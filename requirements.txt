@@ -1,0 +1,34 @@
+# =============================================================================
+# QGenie — C/C++ Codebase Update & Refactor Engine
+# =============================================================================
+# Install:  pip install -r requirements.txt
+# Python:   3.12+ recommended
+# =============================================================================
+
+# --- Visualization & Data ---
+colorama==0.4.6
+openpyxl>=3.1.2
+pandas>=2.2.0
+plotly>=5.15.0
+streamlit>=1.24.0
+xlsxwriter
+matplotlib
+rich
+tqdm==4.65.0
+
+# --- System & Security ---
+python-dotenv
+psutil
+clang==14.*
+lizard
+flawfinder
+pylspclient
+
+# --- Database ---
+psycopg2-binary>=2.9.6
+sqlalchemy>=2.0.15
+langchain-postgres
+
+# --- AI Extensions ---
+langgraph
+networkx

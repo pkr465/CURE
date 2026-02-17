@@ -1,0 +1,942 @@
+{
+  "file:ieee80211_cfg80211.c:1:376": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_1_376.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209301.2642822,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:375:706": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_375_706.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209310.466055,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:705:1098": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_705_1098.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209327.093768,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:1097:1453": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_1097_1453.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209354.992171,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:1452:1992": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_1452_1992.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209386.045861,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:1991:2351": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_1991_2351.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209412.978131,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:2350:2716": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_2350_2716.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209423.768283,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:2715:3004": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_2715_3004.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209445.568498,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:3003:3340": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_3003_3340.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209457.322196,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:3339:3668": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_3339_3668.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209484.47651,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:3667:4075": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_3667_4075.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209498.108605,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:4074:4490": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_4074_4490.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209506.0370371,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:4489:4865": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_4489_4865.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209525.7436988,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:4864:5193": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_4864_5193.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209548.9812758,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:5192:5567": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_5192_5567.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209567.396578,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:5566:5927": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_5566_5927.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209600.987124,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:5926:6232": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_5926_6232.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209636.3120651,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:6231:6563": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_6231_6563.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209674.1837828,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:6562:6939": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_6562_6939.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209697.188598,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:6938:7309": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_6938_7309.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209713.162855,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:7308:7714": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_7308_7714.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209739.085512,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:7713:8204": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_7713_8204.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209783.583408,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:8203:8539": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_8203_8539.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209814.500472,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:8538:8951": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_8538_8951.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209841.151173,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:8950:9368": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_8950_9368.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209864.370486,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:9367:9780": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_9367_9780.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209877.458775,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:9779:10249": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_9779_10249.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209896.7269492,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:10248:10758": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_10248_10758.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209930.357301,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:10757:11296": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_10757_11296.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209959.2406662,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:11295:11647": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_11295_11647.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209979.269901,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:11646:11984": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_11646_11984.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771209996.8967109,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:11983:12396": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_11983_12396.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210023.693686,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:12395:12880": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_12395_12880.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210051.687786,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:12879:13385": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_12879_13385.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210059.634772,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:13384:13832": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_13384_13832.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210079.492588,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:13831:14302": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_13831_14302.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210100.310412,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:14301:14739": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_14301_14739.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210124.031863,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:14738:15200": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_14738_15200.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210143.683265,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:15199:15642": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_15199_15642.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210162.930235,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:15641:16062": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_15641_16062.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210203.589677,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:16061:16545": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_16061_16545.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210229.558002,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:16544:17019": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_16544_17019.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210243.0867991,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:17018:17459": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_17018_17459.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210251.856211,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:17458:17863": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_17458_17863.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210276.572376,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:17862:18318": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_17862_18318.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210295.85622,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:18317:18776": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_18317_18776.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210323.861967,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:18775:19198": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_18775_19198.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210345.361001,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:19197:19665": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_19197_19665.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210362.638249,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:19664:20150": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_19664_20150.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210376.3357399,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:20149:20579": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_20149_20579.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210394.838089,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:20578:21059": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_20578_21059.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210419.973772,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:21058:21497": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_21058_21497.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210432.2954628,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:21496:21917": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_21496_21917.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210449.171718,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:21916:22370": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_21916_22370.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210470.7439392,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:22369:23140": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_22369_23140.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210503.13264,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:23139:23558": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_23139_23558.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210519.8210151,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:23557:23977": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_23557_23977.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210541.251032,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:23976:24408": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_23976_24408.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210559.434121,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:24407:24834": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_24407_24834.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210582.923823,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:24833:25195": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_24833_25195.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210612.598637,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:25194:25658": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_25194_25658.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210645.6321359,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:25657:26020": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_25657_26020.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210689.978581,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:26019:26363": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_26019_26363.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210708.284729,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:26362:26729": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_26362_26729.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210729.726434,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:26728:27150": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_26728_27150.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210745.111425,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:27149:27564": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_27149_27564.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210771.186482,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:27563:27936": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_27563_27936.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210797.669018,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:27935:28375": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_27935_28375.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210809.0087192,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:28374:28704": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_28374_28704.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210867.0456479,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:28703:29277": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_28703_29277.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210881.167503,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:29276:29630": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_29276_29630.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210905.077963,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:29629:30071": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_29629_30071.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210937.256581,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:30070:30416": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_30070_30416.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210972.601026,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:30415:30783": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_30415_30783.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771210984.9376261,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:30782:31133": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_30782_31133.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211003.1260102,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:31132:31491": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_31132_31491.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211023.7380412,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:31490:31839": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_31490_31839.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211054.31105,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:31838:32572": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_31838_32572.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211074.6292439,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:32571:32903": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_32571_32903.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211097.16122,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:32902:33202": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_32902_33202.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211609.286112,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:33201:33580": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_33201_33580.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211623.835488,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:33579:33922": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_33579_33922.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211633.9562318,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:33921:34373": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_33921_34373.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211651.1136918,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:34372:34858": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_34372_34858.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211665.300364,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:34857:35238": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_34857_35238.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211685.534585,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:35237:35640": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_35237_35640.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211722.073567,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:35639:36039": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_35639_36039.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211741.6952572,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:36038:36439": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_36038_36439.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211756.971568,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:36438:36870": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_36438_36870.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211771.626726,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:36869:37291": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_36869_37291.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211802.944115,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:37290:37675": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_37290_37675.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211821.817845,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:37674:38039": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_37674_38039.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211857.558097,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:38038:38433": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_38038_38433.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211884.669711,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  },
+  "file:ieee80211_cfg80211.c:38432:38752": {
+    "artifact_path": "/Users/pavanr/work2/CURE/out/fetch_file_ieee80211_cfg80211.c_38432_38752.json",
+    "source_fingerprint": {
+      "mtime": 1770887745.373997,
+      "size": 1293200,
+      "content_hash": "c973072f745821beb25aa56cdf36127a"
+    },
+    "created_at": 1771211896.233709,
+    "source_file": "/Users/pavanr/work2/CURE/codebase/ieee80211_cfg80211.c"
+  }
+}

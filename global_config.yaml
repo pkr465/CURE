@@ -1,0 +1,237 @@
+# ============================================================================
+# QGenie Codebase Update & Refactor Engine — Global Configuration
+# ============================================================================
+# YAML configuration file providing structured, typed, hierarchical settings.
+# Supports environment variable overrides via ${ENV_VAR} syntax.
+# Copy this file to global_config.yaml and customize for your environment.
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Paths — Input, output, and working directories
+# ----------------------------------------------------------------------------
+paths:
+  source_dir: ./codebase
+  code_base_path: ./codebase
+  word_doc_folder: ./data/docs
+  doc_files: ./data/docs/*.docx
+
+  # Output directories
+  out_dir: ./out
+  generated_md_dir: ./out/md
+  flat_json_path: ./out/parseddata
+  report_json_path: ./out/parseddata
+  graph_path: ./out/diagrams
+  pdf_path: ./out/pdfs
+  img_dir: null # Set if image output is needed
+
+  # Prompt templates
+  prompt_file_path: ./prompts/prompt.md
+  chat_prompt_file_path: ./prompts/chat_prompt.md
+
+# ----------------------------------------------------------------------------
+# LLM — Language model provider and model selection
+# ----------------------------------------------------------------------------
+# Provider routing: set "model" to "provider::model_name".
+# Supported providers:
+#   anthropic  — Anthropic Claude (uses anthropic SDK)
+#   qgenie     — QGenie models    (uses qgenie.integrations.langchain.QGenieChat)
+#   vertexai   — Google Vertex AI  (uses langchain_google_vertexai)
+#   azure      — Azure OpenAI     (uses langchain_openai.AzureChatOpenAI)
+#
+# Examples:
+#   model: anthropic::claude-sonnet-4-20250514    # Claude via Anthropic API
+#   model: qgenie::qwen2.5-14b-1m                 # QGenie local/cloud model
+#   model: vertexai::gemini-2.5-pro                # Google Vertex AI
+#   model: azure::gpt-4.1                          # Azure OpenAI
+# ----------------------------------------------------------------------------
+llm:
+  # ── Primary analysis model ─────────────────────────────────────────────
+
+  # Change this single line to switch the entire engine between providers.
+  model: "azure::gpt-5.2"
+
+  # ── Coding / refactoring model (may differ from primary) ───────────────
+  #coding_model: "anthropic::claude-4-5-sonnet"
+  coding_model: "vertexai::gemini-3-pro-preview"
+  # ── Streamlit / UI model ───────────────────────────────────────────────
+  streamlit_model: "vertexai::gemini-3-pro-preview"
+
+  # ── API keys — prefer ${ENV_VAR} overrides for secrets ─────────────────
+  anthropic_api_key: ${ANTHROPIC_API_KEY}
+  qgenie_api_key: ${QGENIE_API_KEY}
+
+  # ── QGenie Specific Settings ───────────────────────────────────────────
+  chat_endpoint: "https://qgenie-chat.qualcomm.com"
+
+  # ── Request defaults ───────────────────────────────────────────────────
+  max_tokens: 100000
+  temperature: 0.1
+  timeout: 120 # seconds per request
+  max_retries: 2
+
+  # ── Intent extraction tuning ───────────────────────────────────────────
+  intent_max_tokens: 1000000
+  intent_temperature: 0.0
+
+  # ── Token budget for prompt truncation ─────────────────────────────────
+  max_prompt_tokens: 100000
+
+# ----------------------------------------------------------------------------
+# Embeddings — Vector embedding model selection
+# ----------------------------------------------------------------------------
+embeddings:
+  model: qgenie # qgenie | openai
+
+# ----------------------------------------------------------------------------
+# Database — PostgreSQL / PGVector configuration
+# ----------------------------------------------------------------------------
+database:
+  # SQLAlchemy connection string (app user)
+  connection: postgresql+psycopg2://codebase_analytics_user:postgres@localhost/codebase_analytics_db
+
+  host: localhost
+  port: 5432
+  database: codebase_analytics_db
+
+  # Application user
+  username: codebase_analytics_user
+  password: ${POSTGRES_PASSWORD}
+
+  # Admin credentials (migrations/setup only)
+  admin_username: postgres
+  admin_password: ${POSTGRES_ADMIN_PASSWORD}
+
+  # LangChain / pgvector collection tables
+  collection: codebase_analytics_data_2025
+  collection_tablename: langchain_pg_collection
+  embedding_tablename: langchain_pg_embedding
+  store_name: codebase_analytics_vector_db
+
+  # Vector DB backend
+  vector_database: postgres # postgres | chroma | pinecone
+
+# ----------------------------------------------------------------------------
+# Logging & Debugging
+# ----------------------------------------------------------------------------
+logging:
+  level: INFO # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  verbose: false
+  debug: false
+
+# ----------------------------------------------------------------------------
+# Email — Report delivery via SMTP
+# ----------------------------------------------------------------------------
+email:
+  recipients:
+    - pavanr@qti.qualcomm.com
+  smtp_host: "" # e.g., smtp.gmail.com
+  smtp_port: 587
+  smtp_username: ""
+  smtp_password: ${SMTP_PASSWORD}
+  smtp_use_tls: true
+  sender_email: ""
+  sender_name: "Codebase Analysis Agent"
+  max_attachment_size: 15728640 # 15 MB in bytes
+  save_html_on_failure: true
+
+# ----------------------------------------------------------------------------
+# Document Processing
+# ----------------------------------------------------------------------------
+document:
+  format: docx # Input file format
+  toc: false # Generate table of contents
+  html: false # HTML output mode
+  keep_img_dims: false # Preserve original image dimensions
+  recalc_img_dims: false # Recalculate image dimensions
+  recalc_max_dims: 500 # Max dimension when recalculating
+
+# ----------------------------------------------------------------------------
+# External Tools — CLI executables
+# ----------------------------------------------------------------------------
+tools:
+  pandoc_path: pandoc
+  mmdc_path: mmdc # Mermaid CLI
+  wmf2svg_path: null # WMF to SVG converter
+
+# ----------------------------------------------------------------------------
+# Mermaid Diagrams — Rendering configuration
+# ----------------------------------------------------------------------------
+mermaid:
+  background_color: white
+  theme: default # default | dark | forest | neutral
+  width: null # Auto
+  height: null # Auto
+  scale: null # CSS scale factor
+  timeout_seconds: 60
+  keep_intermediate_png: true
+
+# ----------------------------------------------------------------------------
+# Excel Reports — Styling configuration
+# ----------------------------------------------------------------------------
+excel:
+  pass_color: "C6EFCE"
+  fail_color: "FFC7CE"
+  warn_color: "FFEB9C"
+  alt_row_color: "F3F3F3"
+  header_bg_color: "4F81BD"
+  header_font_color: "FFFFFF"
+  freeze_header: true
+  auto_filter: true
+  min_column_width: 12
+  max_column_width: 60
+
+# ----------------------------------------------------------------------------
+# Dependency Builder — CCLS / LSP configuration
+# ----------------------------------------------------------------------------
+dependency_builder:
+  ccls_executable: ccls
+  ccls_log_level: 2
+  default_c_standard: c17
+  default_cpp_standard: c++17
+
+  # Timeouts (seconds)
+  version_check_timeout: 10
+  indexing_timeout_seconds: 300
+  lsp_endpoint_timeout: 30
+  sigterm_timeout: 5
+  sigkill_timeout: 3
+
+  # Caching
+  cache_metadata_filename: .cache_metadata.json
+  file_cache_maxsize: 1024
+
+  # BFS traversal
+  max_bfs_depth: 10
+  max_nodes_per_level: 50
+  max_reference_depth: 3
+
+  # Connection pool
+  pool_size: 4
+  pool_idle_timeout: 300
+  pool_health_check_interval: 60
+
+  # Indexing
+  ccls_ignore_patterns:
+    - "*/test/*"
+    - "*/third_party/*"
+    - "*/.git/*"
+  log_output_truncation: 2000
+  log_error_truncation: 1000
+  virtual_snippet_filename: "__snippet__.cpp"
+
+# ────────────────────────────────────────────────────────────────────────────
+# HITL (Human-in-the-Loop) — Persistent feedback store and RAG-based constraint
+# injection. Enable via --enable-hitl CLI flag.
+# ────────────────────────────────────────────────────────────────────────────
+hitl:
+  enable: false
+  store_db_path: "${OUT_DIR}/hitl/feedback.db"
+  rag_top_k: 5
+  rag_similarity_threshold: 0.6
+  excel_analysis_sheet: "Analysis"
+  feedback_column: "Feedback"
+  constraints_column: "Constraints"
+  constraint_file_pattern: "**/*_constraints.md"
+  enable_prompt_augmentation: true
+  rag_context_max_tokens: 2000
+  auto_persist_feedback: true

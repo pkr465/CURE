@@ -1,0 +1,15 @@
+# CURE — Codebase Update & Refactor Engine
+# Streamlit theme configuration
+
+[theme]
+base = "dark"
+primaryColor = "#00BCD4"
+backgroundColor = "#0D1B2A"
+secondaryBackgroundColor = "#1B2838"
+textColor = "#E0E0E0"
+font = "sans serif"
+
+[server]
+address = "0.0.0.0"
+port = 8502
+enableCORS = false

@@ -312,6 +312,16 @@ class ExcelWriter:
                 row_values.append("")
 
             for col_idx, val in enumerate(row_values, 1):
+                # Sanitize: openpyxl only accepts str, int, float, bool,
+                # datetime, or None.  Convert anything else to str.
+                if val is not None and not isinstance(val, (str, int, float, bool)):
+                    try:
+                        # datetime-like objects are fine
+                        import datetime
+                        if not isinstance(val, (datetime.datetime, datetime.date, datetime.time)):
+                            val = str(val)
+                    except Exception:
+                        val = str(val)
                 cell = ws.cell(row=row_idx, column=col_idx, value=val)
                 cell.border = cell_border
                 cell.alignment = Alignment(vertical="top", wrap_text=True)

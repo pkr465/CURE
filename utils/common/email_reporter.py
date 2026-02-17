@@ -6,10 +6,18 @@ from datetime import datetime
 from typing import List, Dict, Any, Union
 
 # --- Updated Imports per Example ---
-from langchain.agents import create_agent
-from langchain_core.messages import HumanMessage
-from qgenie.integrations.langchain import QGenieChat
-#from qgenie_sdk_tools.tools.email import email_tool
+# Guarded: these may fail if langchain or qgenie SDK versions are mismatched
+try:
+    from langchain.agents import create_agent
+    from langchain_core.messages import HumanMessage
+    from qgenie.integrations.langchain import QGenieChat
+    _LANGCHAIN_AVAILABLE = True
+except ImportError as _e:
+    logging.getLogger(__name__).warning("LangChain/QGenie imports failed: %s", _e)
+    create_agent = None  # type: ignore[assignment]
+    HumanMessage = None  # type: ignore[assignment,misc]
+    QGenieChat = None  # type: ignore[assignment]
+    _LANGCHAIN_AVAILABLE = False
 
 # --- Integration: Global Config ---
 try:
@@ -51,15 +59,22 @@ class EmailReporter:
             self.model_name = raw_model
         
         try:
-            # 2. Initialize QGenie Chat (Matching the example parameters)
-            self.logger.info(f"Initializing QGenieChat with model: {self.model_name}")
-            self.llm = QGenieChat(
-                model=self.model_name,
-                max_tokens=8000, 
-                temperature=0.0, 
-                api_key=self.api_key,
-                backend_url=self.endpoint  # Preserving endpoint config flexibility
-            )
+            # 2. Initialize LLM Chat client
+            if not _LANGCHAIN_AVAILABLE or QGenieChat is None:
+                self.logger.warning(
+                    "LangChain/QGenie SDK not available. "
+                    "EmailReporter will operate without LLM capabilities."
+                )
+                self.llm = None
+            else:
+                self.logger.info(f"Initializing QGenieChat with model: {self.model_name}")
+                self.llm = QGenieChat(
+                    model=self.model_name,
+                    max_tokens=8000,
+                    temperature=0.0,
+                    api_key=self.api_key,
+                    backend_url=self.endpoint
+                )
         except Exception as e:
             self.logger.error(f"Failed to init QGenieChat: {e}")
             self.llm = None

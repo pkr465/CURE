@@ -120,22 +120,27 @@ class FileProcessor:
     # ------------------------------------------------------------------ #
 
     def _is_excluded(self, path: Path) -> bool:
-        """Check if path should be excluded based on directory names and glob patterns."""
-        # Directory exclusions (by name)
-        for part in path.parts:
-            if part in self.exclude_dirs:
-                return True
+        """Check if path should be excluded based on directory names and glob patterns.
 
+        Only inspects path components *relative* to the codebase root so that
+        the location of the codebase itself (e.g. inside an ``out/`` directory)
+        does not accidentally trigger an exclusion.
+        """
         # Relative path for glob matching; guard against paths outside codebase
         try:
-            rel_path = path.relative_to(self.codebase_path).as_posix()
+            rel_path = path.relative_to(self.codebase_path)
         except ValueError:
             # Path not under codebase root (e.g., symlink); treat as excluded
             return True
 
-        rel_path_lower = rel_path.lower()
+        # Directory exclusions — only check parts *below* codebase root
+        for part in rel_path.parts:
+            if part in self.exclude_dirs:
+                return True
+
+        rel_path_str = rel_path.as_posix().lower()
         for pattern in self.exclude_globs:
-            if fnmatch.fnmatch(rel_path_lower, pattern.lower()):
+            if fnmatch.fnmatch(rel_path_str, pattern.lower()):
                 return True
 
         return False

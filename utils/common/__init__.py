@@ -2,21 +2,26 @@
 utils.common - Standalone tool classes for codebase analysis.
 
 Modules:
-    llm_tools       - Multi-provider LLM integration (Claude, QGenie, VertexAI, Azure)
-    email_reporter  - HTML email report generation and SMTP sending
-    excel_writer    - Professional Excel report creation
-    mmdtopdf        - Mermaid diagram to PNG/SVG/PDF conversion
+    llm_tools            - Provider router (auto-selects QGenie or Anthropic)
+    llm_tools_qgenie     - QGenie LLM integration
+    llm_tools_anthropic  - Anthropic Claude LLM integration
+    email_reporter       - HTML email report generation and SMTP sending
+    excel_writer         - Professional Excel report creation
+    mmdtopdf             - Mermaid diagram to PNG/SVG/PDF conversion
 
 All classes are standalone with no cross-dependencies.
 Each module uses dataclass-based configuration with from_env() factory methods.
 """
 
+# Router — re-exports the active provider's classes based on global_config.yaml
 from utils.common.llm_tools import (
     LLMTools,
     LLMConfig,
     BaseLLMProvider,
     QGenieProvider,
+    AnthropicProvider,
     create_provider,
+    get_active_provider,
     LLMError,
     LLMProviderError,
     LLMResponseError,
@@ -40,14 +45,14 @@ from utils.common.mmdtopdf import (
 )
 
 __all__ = [
-    # LLM (multi-provider)
+    # LLM (provider-routed)
     "LLMTools",
     "LLMConfig",
     "BaseLLMProvider",
     "QGenieProvider",
-    "PROVIDER_REGISTRY",
+    "AnthropicProvider",
     "create_provider",
-    "parse_provider_model",
+    "get_active_provider",
     "LLMError",
     "LLMProviderError",
     "LLMResponseError",
@@ -55,9 +60,6 @@ __all__ = [
     "ProviderNotAvailableError",
     # Email
     "EmailReporter",
-    "HTMLReportGenerator",
-    "EmailError",
-    "EmailSendError",
     # Excel
     "ExcelWriter",
     "ExcelStyle",

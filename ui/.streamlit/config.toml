@@ -2,11 +2,11 @@
 # Streamlit theme configuration
 
 [theme]
-base = "dark"
-primaryColor = "#00BCD4"
-backgroundColor = "#0D1B2A"
-secondaryBackgroundColor = "#1B2838"
-textColor = "#E0E0E0"
+base = "light"
+primaryColor = "#007AFF"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F5F5F7"
+textColor = "#1D1D1F"
 font = "sans serif"
 
 [server]

@@ -1,10 +1,10 @@
 """
-launch_streamlit.py
+launch.py
 
 CURE — Codebase Update & Refactor Engine
 Launches the Streamlit dashboard. Run from the project root:
 
-    python ui/launch_streamlit.py
+    python ui/launch.py
 
 The default port is 8502; override via STREAMLIT_PORT env var.
 """
@@ -54,14 +54,14 @@ def main():
         sys.exit(1)
 
     # Locate the app file (support running from project root or ui/)
-    app_path = "ui/streamlit_app.py"
+    app_path = "ui/app.py"
     if not os.path.isfile(app_path):
-        alt = os.path.join(os.path.dirname(__file__), "streamlit_app.py")
+        alt = os.path.join(os.path.dirname(__file__), "app.py")
         if os.path.isfile(alt):
             app_path = alt
         else:
             print(
-                "ERROR: Cannot find streamlit_app.py. "
+                "ERROR: Cannot find app.py. "
                 "Run from the project root directory.",
                 file=sys.stderr,
             )

@@ -8,20 +8,31 @@ Author: Pavan R
 """
 
 import os
+import platform
 import socket
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import pandas as pd
 import streamlit as st
 
-# ── Brand constants ──────────────────────────────────────────────────────────
-CURE_CYAN = "#00BCD4"
-CURE_DARK_BG = "#0D1B2A"
-CURE_CARD_BG = "#1B2838"
-CURE_TEXT = "#E0E0E0"
-CURE_ACCENT = "#80DEEA"
-CURE_GREEN = "#4CAF50"
-CURE_GOLD = "#FFD700"
+# ── Brand constants (Apple-inspired light theme) ────────────────────────────
+CURE_PRIMARY = "#007AFF"        # Apple blue
+CURE_BG = "#FFFFFF"             # Pure white background
+CURE_SURFACE = "#F5F5F7"       # Apple light gray (cards, sections)
+CURE_CARD_BG = "#FFFFFF"        # White cards
+CURE_TEXT = "#1D1D1F"           # Apple near-black text
+CURE_TEXT_SECONDARY = "#86868B" # Apple secondary gray
+CURE_ACCENT = "#007AFF"        # Apple blue accent
+CURE_GREEN = "#34C759"         # Apple green
+CURE_GOLD = "#FF9F0A"          # Apple orange/gold
+CURE_RED = "#FF3B30"           # Apple red
+CURE_BORDER = "#D2D2D7"        # Apple border gray
+CURE_SIDEBAR_BG = "#F5F5F7"    # Light sidebar
+
+# Legacy alias for backwards compatibility
+CURE_CYAN = CURE_PRIMARY
+CURE_DARK_BG = CURE_SURFACE
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -29,37 +40,52 @@ CURE_GOLD = "#FFD700"
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def app_css() -> None:
-    """Injects CURE-branded global CSS styling."""
+    """Injects Apple-inspired light-theme global CSS styling."""
     st.markdown(
         f"""
         <style>
-        /* ── Base typography ─────────────────────────────────────── */
+        /* ── Base typography (SF Pro / system font stack) ─────────── */
         html, body, table, th, td {{
-            font-family: "SF Pro Display", "Helvetica Neue", Arial, sans-serif !important;
+            font-family: -apple-system, "SF Pro Display", "SF Pro Text",
+                         "Helvetica Neue", Arial, sans-serif !important;
             font-feature-settings: "liga" on, "kern" on;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }}
+
+        /* ── Main content area — clean white bg ──────────────────── */
+        .stApp {{
+            background-color: {CURE_BG} !important;
+        }}
+        .main .block-container {{
+            background-color: {CURE_BG} !important;
         }}
 
         /* ── Table styling ───────────────────────────────────────── */
         table, th, td {{
-            background-color: {CURE_DARK_BG} !important;
+            background-color: {CURE_BG} !important;
             color: {CURE_TEXT} !important;
-            border-color: #2A2A2A !important;
+            border-color: {CURE_BORDER} !important;
         }}
         thead th {{
-            background-color: {CURE_CARD_BG} !important;
-            color: {CURE_CYAN} !important;
+            background-color: {CURE_SURFACE} !important;
+            color: {CURE_TEXT} !important;
             font-weight: 600 !important;
+            font-size: 13px !important;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
         }}
         table, .stDataFrame table, .stChatMessage table {{
-            border-radius: 12px !important;
+            border-radius: 10px !important;
             overflow: hidden !important;
             margin-bottom: 1em;
+            border: 1px solid {CURE_BORDER} !important;
         }}
 
         /* ── Headings ────────────────────────────────────────────── */
         h1, h2, h3 {{
-            color: {CURE_ACCENT} !important;
-            letter-spacing: 0.3px;
+            color: {CURE_TEXT} !important;
+            letter-spacing: -0.3px;
             font-weight: 700;
             border: none;
         }}
@@ -69,19 +95,77 @@ def app_css() -> None:
         }}
 
         hr {{
-            border-top: 2px solid #2A2A2A !important;
+            border-top: 1px solid {CURE_BORDER} !important;
             margin-top: 16px;
             margin-bottom: 16px;
         }}
 
-        /* ── Sidebar branding ────────────────────────────────────── */
+        /* ── Sidebar — Apple-style light panel ───────────────────── */
         [data-testid="stSidebar"] {{
-            background: linear-gradient(180deg, {CURE_DARK_BG} 0%, {CURE_CARD_BG} 100%);
+            background: {CURE_SIDEBAR_BG} !important;
+            border-right: 1px solid {CURE_BORDER};
         }}
         [data-testid="stSidebar"] h1,
         [data-testid="stSidebar"] h2,
         [data-testid="stSidebar"] h3 {{
-            color: {CURE_CYAN} !important;
+            color: {CURE_TEXT} !important;
+        }}
+        [data-testid="stSidebar"] p,
+        [data-testid="stSidebar"] span,
+        [data-testid="stSidebar"] label,
+        [data-testid="stSidebar"] .stMarkdown,
+        [data-testid="stSidebar"] .stRadio label,
+        [data-testid="stSidebar"] .stRadio div[role="radiogroup"] label,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+        [data-testid="stSidebar"] .stCheckbox label,
+        [data-testid="stSidebar"] .stToggle label,
+        [data-testid="stSidebar"] div[data-baseweb="radio"] label {{
+            color: {CURE_TEXT} !important;
+        }}
+        [data-testid="stSidebar"] div[data-baseweb="radio"] div {{
+            border-color: {CURE_PRIMARY} !important;
+        }}
+        [data-testid="stSidebar"] .stToggle span,
+        [data-testid="stSidebar"] [data-testid="stWidgetLabel"] {{
+            color: {CURE_TEXT} !important;
+        }}
+
+        /* ── Buttons — Apple style ───────────────────────────────── */
+        .stButton > button[kind="primary"] {{
+            background-color: {CURE_PRIMARY} !important;
+            border: none !important;
+            border-radius: 8px !important;
+            font-weight: 500 !important;
+        }}
+        .stButton > button {{
+            border-radius: 8px !important;
+            border: 1px solid {CURE_BORDER} !important;
+            font-weight: 500 !important;
+        }}
+
+        /* ── Tabs styling ────────────────────────────────────────── */
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: 4px;
+            background: {CURE_SURFACE};
+            border-radius: 10px;
+            padding: 4px;
+        }}
+        .stTabs [data-baseweb="tab"] {{
+            border-radius: 8px !important;
+            padding: 8px 16px !important;
+            font-weight: 500 !important;
+            color: {CURE_TEXT_SECONDARY} !important;
+        }}
+        .stTabs [aria-selected="true"] {{
+            background-color: {CURE_BG} !important;
+            color: {CURE_TEXT} !important;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.08) !important;
+        }}
+
+        /* ── Input fields ────────────────────────────────────────── */
+        .stTextInput input, .stNumberInput input, .stSelectbox select {{
+            border-radius: 8px !important;
+            border: 1px solid {CURE_BORDER} !important;
         }}
 
         /* ── Feedback row ────────────────────────────────────────── */
@@ -95,20 +179,23 @@ def app_css() -> None:
         .feedback-label {{
             font-weight: bold;
             font-size: 16px;
+            color: {CURE_TEXT};
         }}
         .feedback-btn {{
             font-size: 16px;
             padding: 6px 15px;
-            border-radius: 5px;
-            border: none;
+            border-radius: 8px;
+            border: 1px solid {CURE_BORDER};
             cursor: pointer;
+            background: {CURE_BG};
+            color: {CURE_TEXT};
         }}
         .feedback-summary {{
-            background-color: {CURE_CARD_BG};
-            border-radius: 6px;
-            border: 1px solid {CURE_CYAN};
+            background-color: {CURE_SURFACE};
+            border-radius: 8px;
+            border: 1px solid {CURE_BORDER};
             padding: 7px 12px;
-            color: {CURE_ACCENT};
+            color: {CURE_PRIMARY};
             font-size: 15px;
             margin-left: 10px;
             display: inline-block;
@@ -117,6 +204,21 @@ def app_css() -> None:
         /* ── Chat message tweaks ─────────────────────────────────── */
         .stChatMessage {{
             border-radius: 12px !important;
+            border: 1px solid {CURE_BORDER} !important;
+        }}
+
+        /* ── Expander styling ────────────────────────────────────── */
+        .streamlit-expanderHeader {{
+            font-weight: 600 !important;
+            color: {CURE_TEXT} !important;
+        }}
+
+        /* ── Metric cards ────────────────────────────────────────── */
+        [data-testid="stMetric"] {{
+            background: {CURE_SURFACE};
+            border-radius: 10px;
+            padding: 12px 16px;
+            border: 1px solid {CURE_BORDER};
         }}
         </style>
         """,
@@ -199,29 +301,39 @@ def get_local_ip() -> str:
 
 def sidebar(logo_path: str) -> str:
     """
-    Renders the CURE-branded sidebar with logo, navigation, and version info.
+    Renders the CURE-branded sidebar with logo, navigation (Chat / About),
+    feedback toggle, and version info.
 
-    Returns the currently selected page name.
+    The four workflow pages (Analyze, Pipeline, Review, Fix & QA) are shown
+    as top-level tabs instead of sidebar radio buttons.
+
+    Returns the currently selected sidebar page name, or empty string
+    if no sidebar page is active (i.e. the user is on a tab page).
     """
     with st.sidebar:
         # Logo
         if logo_path and os.path.isfile(logo_path):
             try:
-                st.image(logo_path, use_container_width=True)
+                st.image(logo_path, width=180)
             except Exception:
                 pass
 
         st.markdown(
-            f"<h5 style='text-align:center; color:{CURE_CYAN}; margin-top:-10px; "
-            f"margin-bottom:18px;'>CURE</h5>",
+            f"<h5 style='text-align:center; color:{CURE_PRIMARY}; margin-top:-10px; "
+            f"margin-bottom:18px; font-weight:700;'>CURE</h5>",
             unsafe_allow_html=True,
         )
 
-        # Navigation
+        st.markdown(
+            "<hr style='margin-top: 4px; margin-bottom: 10px;'>",
+            unsafe_allow_html=True,
+        )
+
+        # Sidebar navigation — only Chat and About
         st.markdown("### Navigation")
         page = st.radio(
-            "Main Menu",
-            ("Chat", "About", "FAQ"),
+            "Sidebar Menu",
+            ("Workflow", "Chat", "About"),
             index=0,
             label_visibility="collapsed",
         )
@@ -237,10 +349,10 @@ def sidebar(logo_path: str) -> str:
 
         # Version badge
         st.markdown(
-            f"<div style='text-align:center; margin-top:20px; padding:8px; "
-            f"background:{CURE_CARD_BG}; border-radius:8px; border:1px solid #2A2A2A;'>"
-            f"<span style='color:{CURE_ACCENT}; font-size:12px;'>CURE v2.0</span><br>"
-            f"<span style='color:#888; font-size:11px;'>Codebase Analysis<br>&amp; Refactor Engine</span>"
+            f"<div style='text-align:center; margin-top:20px; padding:10px; "
+            f"background:{CURE_BG}; border-radius:10px; border:1px solid {CURE_BORDER};'>"
+            f"<span style='color:{CURE_PRIMARY}; font-size:12px; font-weight:600;'>CURE v2.0</span><br>"
+            f"<span style='color:{CURE_TEXT_SECONDARY}; font-size:11px;'>Codebase Analysis<br>&amp; Refactor Engine</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -394,3 +506,355 @@ def feedback_widget(
         }
 
     return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Pipeline phase tracker
+# ═══════════════════════════════════════════════════════════════════════════════
+
+PHASE_ICONS = {
+    "completed": "✅",
+    "in_progress": "⏳",
+    "pending": "○",
+    "error": "❌",
+}
+
+
+def render_phase_tracker(
+    phase_names: Dict[int, str],
+    phase_statuses: Dict[int, str],
+) -> None:
+    """
+    Renders a pipeline phase progress tracker.
+
+    Args:
+        phase_names: Mapping of phase number to display name.
+        phase_statuses: Mapping of phase number to status string
+                       ("pending", "in_progress", "completed", "error").
+    """
+    cols = st.columns(len(phase_names))
+    for i, (phase_num, name) in enumerate(sorted(phase_names.items())):
+        status = phase_statuses.get(phase_num, "pending")
+        icon = PHASE_ICONS.get(status, "○")
+
+        color = CURE_TEXT_SECONDARY
+        bg = CURE_SURFACE
+        if status == "completed":
+            color = CURE_GREEN
+            bg = "#F0FDF4"
+        elif status == "in_progress":
+            color = CURE_PRIMARY
+            bg = "#EFF6FF"
+        elif status == "error":
+            color = CURE_RED
+            bg = "#FEF2F2"
+
+        with cols[i]:
+            st.markdown(
+                f"<div style='text-align:center; padding:10px; background:{bg}; "
+                f"border-radius:10px; border:1px solid {CURE_BORDER};'>"
+                f"<span style='font-size:24px;'>{icon}</span><br>"
+                f"<span style='color:{color}; font-size:12px; font-weight:600;'>"
+                f"Phase {phase_num}</span><br>"
+                f"<span style='color:{CURE_TEXT}; font-size:11px;'>{name}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Log stream renderer
+# ═══════════════════════════════════════════════════════════════════════════════
+
+LOG_LEVEL_COLORS = {
+    "INFO": "#1D1D1F",
+    "WARNING": "#FF9F0A",
+    "ERROR": "#FF3B30",
+    "DEBUG": "#86868B",
+}
+
+
+def render_log_stream(
+    logs: list,
+    max_lines: int = 100,
+) -> None:
+    """
+    Renders a scrollable log stream with color-coded severity.
+
+    Args:
+        logs: List of log entry dicts with keys: timestamp, level, message.
+        max_lines: Maximum number of lines to display.
+    """
+    recent = logs[-max_lines:] if len(logs) > max_lines else logs
+
+    if not recent:
+        st.caption("Waiting for log output...")
+        return
+
+    lines_html = []
+    for entry in recent:
+        if isinstance(entry, dict):
+            ts = entry.get("timestamp", "")
+            level = entry.get("level", "INFO")
+            msg = entry.get("message", "")
+        elif isinstance(entry, (list, tuple)) and len(entry) >= 3:
+            ts, level, msg = str(entry[0]), str(entry[1]), str(entry[2])
+        else:
+            msg = str(entry)
+            ts, level = "", "INFO"
+
+        # Skip internal sentinel messages
+        if msg == "__DONE__":
+            continue
+
+        color = LOG_LEVEL_COLORS.get(level, CURE_TEXT)
+        # Escape HTML in message
+        safe_msg = msg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        lines_html.append(
+            f"<span style='color:#666;'>{ts}</span> "
+            f"<span style='color:{color};'>{safe_msg}</span>"
+        )
+
+    html = (
+        f"<div style='background:{CURE_SURFACE}; border:1px solid {CURE_BORDER}; "
+        f"border-radius:10px; padding:14px; max-height:400px; overflow-y:auto; "
+        f"font-family:\"SF Mono\",\"Menlo\",\"Fira Code\",monospace; font-size:12px; "
+        f"line-height:1.7;'>"
+        + "<br>".join(lines_html)
+        + "</div>"
+    )
+    st.markdown(html, unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Severity badge
+# ═══════════════════════════════════════════════════════════════════════════════
+
+SEVERITY_COLORS = {
+    "Critical": "#FF3B30",
+    "High": "#FF6B35",
+    "Medium": "#FF9F0A",
+    "Low": "#34C759",
+}
+
+
+def severity_badge(severity: str) -> str:
+    """Returns an HTML badge for a severity level."""
+    color = SEVERITY_COLORS.get(severity, CURE_TEXT_SECONDARY)
+    return (
+        f"<span style='background:{color}15; color:{color}; "
+        f"padding:3px 10px; border-radius:6px; font-size:12px; "
+        f"font-weight:600;'>{severity}</span>"
+    )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Folder / file browser widget
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _get_system_roots() -> List[str]:
+    """Return sensible filesystem roots for the current OS."""
+    system = platform.system()
+    if system == "Windows":
+        # List available drive letters
+        import string
+        drives = []
+        for letter in string.ascii_uppercase:
+            drive = f"{letter}:\\"
+            if os.path.isdir(drive):
+                drives.append(drive)
+        return drives if drives else ["C:\\"]
+    elif system == "Darwin":
+        roots = [str(Path.home()), "/", "/Volumes"]
+        return [r for r in roots if os.path.isdir(r)]
+    else:
+        roots = [str(Path.home()), "/"]
+        return [r for r in roots if os.path.isdir(r)]
+
+
+def _list_directory(path: str) -> Tuple[List[str], List[str]]:
+    """
+    List directories and files under *path*.
+    Returns (sorted_dirs, sorted_files).  Silently skips permission errors.
+    """
+    dirs, files = [], []
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    name = entry.name
+                    if name.startswith("."):
+                        continue  # hide dotfiles by default
+                    if entry.is_dir(follow_symlinks=False):
+                        dirs.append(name)
+                    elif entry.is_file(follow_symlinks=False):
+                        files.append(name)
+                except (PermissionError, OSError):
+                    continue
+    except (PermissionError, OSError):
+        pass
+    dirs.sort(key=str.lower)
+    files.sort(key=str.lower)
+    return dirs, files
+
+
+def folder_browser(
+    label: str = "Browse",
+    default_path: str = "",
+    key: str = "folder_browser",
+    show_files: bool = True,
+    file_extensions: Optional[List[str]] = None,
+    help_text: str = "",
+) -> str:
+    """
+    Renders an interactive folder/file browser inside the Streamlit UI.
+
+    Works on Windows, macOS, and Linux.  The user can:
+    - Type / paste a path directly
+    - Click 📂 Browse to open an in-page navigator
+    - Navigate into sub-folders recursively
+    - Go up to the parent directory
+    - Select a folder (or file) and confirm
+
+    Args:
+        label: Display label for the text input.
+        default_path: Initial value shown in the text input.
+        key: Unique Streamlit widget key prefix.
+        show_files: Whether to list files alongside directories.
+        file_extensions: If set, only show files matching these extensions
+                        (e.g. [".c", ".cpp", ".h"]).
+        help_text: Tooltip / help string for the text input.
+
+    Returns:
+        The selected (or typed) path string.
+    """
+
+    # ── Session state keys ────────────────────────────────────────────────
+    browse_key = f"{key}_browsing"
+    nav_key = f"{key}_nav_path"
+
+    if browse_key not in st.session_state:
+        st.session_state[browse_key] = False
+    if nav_key not in st.session_state:
+        st.session_state[nav_key] = ""
+
+    # ── Text input + Browse button side by side ───────────────────────────
+    col_input, col_btn = st.columns([5, 1])
+    with col_input:
+        typed_path = st.text_input(
+            label,
+            value=default_path,
+            key=f"{key}_text",
+            help=help_text or "Type a path or click Browse to navigate.",
+        )
+    with col_btn:
+        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
+        if st.button("📂 Browse", key=f"{key}_btn"):
+            # Initialise starting directory
+            start = typed_path.strip() if typed_path.strip() else str(Path.home())
+            if not os.path.isdir(start):
+                start = str(Path.home())
+            st.session_state[nav_key] = start
+            st.session_state[browse_key] = True
+            st.rerun()
+
+    # ── Browser panel ─────────────────────────────────────────────────────
+    if st.session_state[browse_key]:
+        current = st.session_state[nav_key]
+
+        # Validate current path
+        if not current or not os.path.isdir(current):
+            current = str(Path.home())
+            st.session_state[nav_key] = current
+
+        with st.container():
+            st.markdown(
+                f"<div style='background:{CURE_SURFACE}; border:1px solid {CURE_BORDER}; "
+                f"border-radius:10px; padding:12px; margin-bottom:12px;'>"
+                f"<span style='color:{CURE_TEXT}; font-weight:600;'>📂 Folder Browser</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
+
+            # Current path display
+            st.code(current, language=None)
+
+            # Action row: quick roots, parent, select, close
+            root_cols = st.columns([2, 2, 2, 2, 2])
+
+            with root_cols[0]:
+                roots = _get_system_roots()
+                root_choice = st.selectbox(
+                    "Quick Jump",
+                    [""] + roots,
+                    key=f"{key}_roots",
+                    label_visibility="collapsed",
+                    format_func=lambda x: "📌 Quick Jump…" if x == "" else x,
+                )
+                if root_choice:
+                    st.session_state[nav_key] = root_choice
+                    st.rerun()
+
+            with root_cols[1]:
+                parent = str(Path(current).parent)
+                if st.button("⬆ Parent", key=f"{key}_parent", disabled=(parent == current)):
+                    st.session_state[nav_key] = parent
+                    st.rerun()
+
+            with root_cols[2]:
+                if st.button("🏠 Home", key=f"{key}_home"):
+                    st.session_state[nav_key] = str(Path.home())
+                    st.rerun()
+
+            with root_cols[3]:
+                if st.button("✅ Select", key=f"{key}_select", type="primary"):
+                    st.session_state[browse_key] = False
+                    st.rerun()
+
+            with root_cols[4]:
+                if st.button("✖ Close", key=f"{key}_close"):
+                    st.session_state[browse_key] = False
+                    st.rerun()
+
+            st.markdown(
+                f"<hr style='margin:6px 0; border-color:{CURE_BORDER};'>",
+                unsafe_allow_html=True,
+            )
+
+            # ── Directory listing ─────────────────────────────────────────
+            dirs, files = _list_directory(current)
+
+            if not dirs and not files:
+                st.caption("Empty directory or no permissions.")
+            else:
+                # Show directories first
+                for d in dirs:
+                    full = os.path.join(current, d)
+                    if st.button(f"📁 {d}", key=f"{key}_d_{d}"):
+                        st.session_state[nav_key] = full
+                        st.rerun()
+
+                # Optionally show files
+                if show_files and files:
+                    filtered = files
+                    if file_extensions:
+                        ext_set = {e.lower().lstrip(".") for e in file_extensions}
+                        filtered = [
+                            f for f in files
+                            if f.rsplit(".", 1)[-1].lower() in ext_set
+                        ]
+                    if filtered:
+                        st.markdown(
+                            f"<span style='color:{CURE_TEXT_SECONDARY}; font-size:12px; "
+                            f"font-weight:600;'>Files ({len(filtered)})</span>",
+                            unsafe_allow_html=True,
+                        )
+                        for f in filtered[:100]:  # cap at 100 to avoid UI lag
+                            st.caption(f"  📄 {f}")
+                        if len(filtered) > 100:
+                            st.caption(f"  … and {len(filtered) - 100} more files")
+
+        # Return the navigated path when browsing
+        return current
+
+    return typed_path

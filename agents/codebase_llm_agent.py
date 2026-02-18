@@ -200,11 +200,11 @@ class CodebaseLLMAgent:
 
     def _load_constraints(self, file_path: str, section_keyword: str = "Issue Identification Rules") -> str:
         """
-        Loads constraints from agents/constraints/common_constraints.md 
-        and agents/constraints/<filename>_constraints.md.
+        Loads constraints from:
+        1. agents/constraints/common_constraints.md 
+        2. A recursive search for <filename>_constraints.md inside agents/constraints/
         
-        Specifically extracts the section matching 'section_keyword' (default: 'Issue Identification Rules')
-        to ensure the LLM Agent only receives rules about WHAT to flag/ignore, not how to fix.
+        Specifically extracts the section matching 'section_keyword' (default: 'Issue Identification Rules').
         
         :param file_path: The relative path or filename of the code being analyzed.
         :param section_keyword: The header keyword to look for in the markdown files.
@@ -212,8 +212,14 @@ class CodebaseLLMAgent:
         """
         combined_constraints = []
         
+        # Ensure self.constraints_dir is a Path object
+        base_dir = Path(self.constraints_dir)
+        
+        # ---------------------------------------------------------
         # 1. Load Common Constraints
-        common_file = self.constraints_dir / "common_constraints.md"
+        # ---------------------------------------------------------
+        common_file = base_dir / "common_constraints.md"
+        
         if common_file.exists():
             try:
                 with open(common_file, 'r', encoding='utf-8') as f:
@@ -222,26 +228,52 @@ class CodebaseLLMAgent:
                     if section_content:
                         combined_constraints.append(f"--- GLOBAL IDENTIFICATION RULES ---\n{section_content}\n")
             except Exception as e:
-                logger.warning(f"Failed to read common constraints: {e}")
+                logger.warning(f"Failed to read common constraints at {common_file}: {e}")
+
+        # ---------------------------------------------------------
+        # 2. Load File-Specific Constraints (Recursive Search)
+        # ---------------------------------------------------------
+        # Create a Path object from the input string to handle parsing easily
+        target_path = Path(file_path)
         
-        # 2. Load File-Specific Constraints
-        # We assume the constraint file is named: <filename>_constraints.md (e.g., dp_tx.c_constraints.md)
-        target_filename = os.path.basename(file_path)
-        # Split the filename and extension, then take the first part (the name)
-        filename_no_ext = os.path.splitext(target_filename)[0]
-        specific_file = f"{filename_no_ext}_constraints.md"
+        # .stem returns the filename without the last extension (e.g., 'ratectrl.c' -> 'ratectrl')
+        target_name_no_ext = target_path.stem
         
-        if os.path.exists(specific_file):
+        # Construct the search pattern: e.g., "ratectrl_constraints.md"
+        search_filename = f"{target_name_no_ext}_constraints.md"
+        
+        specific_file_path = None
+        
+        try:
+            # rglob('*') recursively searches all subdirectories
+            # We search specifically for the filename we constructed
+            found_files = list(base_dir.rglob(search_filename))
+            
+            if len(found_files) == 1:
+                specific_file_path = found_files[0]
+            elif len(found_files) > 1:
+                # If multiple files match (e.g., in different subfolders), pick the first but warn
+                specific_file_path = found_files[0]
+                logger.warning(f"Multiple constraint files found for {search_filename}. Using: {specific_file_path}")
+                
+        except Exception as e:
+            logger.error(f"Error while searching for specific constraints: {e}")
+
+        # If we found a file, read it
+        if specific_file_path and specific_file_path.exists():
             try:
-                with open(specific_file, 'r', encoding='utf-8') as f:
+                with open(specific_file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                     section_content = self._extract_constraint_section(content, section_keyword)
                     if section_content:
-                        combined_constraints.append(f"--- SPECIFIC FILE RULES ({target_filename}) ---\n{section_content}\n")
-                logger.info(f"    > Loaded specific constraints: {specific_constraint_name}")
+                        combined_constraints.append(f"--- SPECIFIC FILE RULES ({target_path.name}) ---\n{section_content}\n")
+                logger.info(f"    > Loaded specific constraints: {specific_file_path}")
             except Exception as e:
-                logger.warning(f"Failed to read specific constraints for {target_filename}: {e}")
+                logger.warning(f"Failed to read specific constraints at {specific_file_path}: {e}")
                 
+        # ---------------------------------------------------------
+        # 3. Return Combined Result
+        # ---------------------------------------------------------
         if not combined_constraints:
             return ""
 

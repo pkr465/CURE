@@ -20,6 +20,38 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# ── Telemetry singleton (lazy init) ──────────────────────────────────────────
+_telemetry_service = None
+
+
+def _get_telemetry():
+    """Lazy-load the TelemetryService singleton."""
+    global _telemetry_service
+    if _telemetry_service is not None:
+        return _telemetry_service
+    try:
+        from utils.parsers.global_config_parser import GlobalConfig
+        gc = GlobalConfig()
+        telemetry_enabled = gc.get_bool("telemetry.enable", True)
+        if not telemetry_enabled:
+            from db.telemetry_service import TelemetryService
+            _telemetry_service = TelemetryService(enabled=False)
+            return _telemetry_service
+        conn_str = gc.get("POSTGRES_CONNECTION")
+        if conn_str:
+            from db.telemetry_service import TelemetryService
+            _telemetry_service = TelemetryService(connection_string=conn_str)
+            return _telemetry_service
+    except Exception as exc:
+        logger.debug("Telemetry not available: %s", exc)
+    # Return a disabled stub
+    try:
+        from db.telemetry_service import TelemetryService
+        _telemetry_service = TelemetryService(enabled=False)
+    except ImportError:
+        _telemetry_service = None
+    return _telemetry_service
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Log capture handler — intercepts logging output and pushes to a Queue
@@ -65,13 +97,20 @@ class LogCaptureHandler(logging.Handler):
     def _detect_phase(self, msg: str) -> Optional[int]:
         """Detect pipeline phase from log message content."""
         phase_keywords = {
-            1: ["file discovery", "discovering files", "file cache", "scanning"],
-            2: ["batch analysis", "analyzing batch", "batch processing", "analyzer"],
-            3: ["dependency graph", "building graph", "dependency analysis"],
-            4: ["health metrics", "calculating metrics", "health score"],
-            5: ["llm enrichment", "llm analysis", "llm call", "semantic analysis"],
-            6: ["report generation", "generating report", "excel", "saving report"],
-            7: ["visualization", "mermaid", "diagram", "summary"],
+            1: ["file discovery", "discovering files", "file cache", "scanning",
+                "found", "files to analyze", "matching files"],
+            2: ["batch analysis", "analyzing batch", "batch processing", "analyzer",
+                "analyzing:", "processing chunk", "analysis (run id"],
+            3: ["dependency graph", "building graph", "dependency analysis",
+                "dependency fetch", "ccls"],
+            4: ["health metrics", "calculating metrics", "health score",
+                "critical issues"],
+            5: ["llm enrichment", "llm analysis", "llm call", "semantic analysis",
+                "llm initialized", "llm-exclusive"],
+            6: ["report generation", "generating report", "excel", "saving report",
+                "report saved", "success!"],
+            7: ["visualization", "mermaid", "diagram", "summary",
+                "vector db", "vector-ready", "ingestion complete"],
         }
         msg_lower = msg.lower()
         for phase_num, keywords in phase_keywords.items():
@@ -119,6 +158,27 @@ def _strip_ansi(text: str) -> str:
     """Remove ANSI escape sequences from text."""
     import re
     return re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", text)
+
+
+def _setup_debug_file_handler(output_dir: str) -> Optional[logging.FileHandler]:
+    """
+    Create a DEBUG-level FileHandler writing to {output_dir}/debug.log.
+
+    Returns the handler (caller must add/remove it from the root logger),
+    or None if the file cannot be created.
+    """
+    try:
+        os.makedirs(output_dir, exist_ok=True)
+        log_path = os.path.join(output_dir, "debug.log")
+        fh = logging.FileHandler(log_path, mode="w", encoding="utf-8")
+        fh.setLevel(logging.DEBUG)
+        fh.setFormatter(logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        ))
+        return fh
+    except Exception as exc:
+        logger.debug("Could not create debug.log: %s", exc)
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -179,10 +239,21 @@ def run_analysis_background(
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
+    # Debug file handler — writes all DEBUG+ logs to {output_dir}/debug.log
+    output_dir = config.get("output_dir", "./out")
+    debug_fh = _setup_debug_file_handler(output_dir)
+    if debug_fh:
+        root_logger.addHandler(debug_fh)
+        root_logger.setLevel(logging.DEBUG)
+
     # Also capture stdout for rich console output
     console_capture = ConsoleCaptureHandler(log_queue)
     original_stdout = sys.stdout
     sys.stdout = console_capture
+
+    start_time = time.time()
+    telemetry = _get_telemetry()
+    run_id = ""
 
     try:
         codebase_path = config.get("codebase_path", "./codebase")
@@ -190,6 +261,18 @@ def run_analysis_background(
         os.makedirs(output_dir, exist_ok=True)
 
         analysis_mode = config.get("analysis_mode", "llm_exclusive")
+
+        # Start telemetry run
+        if telemetry:
+            run_id = telemetry.start_run(
+                mode="analysis",
+                codebase_path=codebase_path,
+                llm_model=config.get("llm_model", ""),
+                use_ccls=config.get("use_ccls", False),
+                use_hitl=bool(config.get("enable_hitl", False)),
+                metadata={"analysis_mode": analysis_mode},
+            )
+            result_store["telemetry_run_id"] = run_id
 
         _push_log(log_queue, f"Starting {analysis_mode} analysis on: {codebase_path}")
 
@@ -217,21 +300,30 @@ def run_analysis_background(
             except Exception as e:
                 _push_log(log_queue, f"LLM init failed: {e}", level="WARNING")
 
-        # Initialize HITL context if available
+        # Initialize HITL context if enabled
         hitl_context = None
-        try:
-            from hitl import HITLContext, HITLConfig, HITL_AVAILABLE
-            if HITL_AVAILABLE:
-                hitl_config = HITLConfig()
-                hitl_context = HITLContext(config=hitl_config, llm_tools=llm_tools)
-                _push_log(log_queue, "HITL context initialized")
-        except Exception:
-            pass
+        if config.get("enable_hitl", False):
+            try:
+                from hitl import HITLContext, HITLConfig, HITL_AVAILABLE
+                if HITL_AVAILABLE:
+                    if global_config:
+                        hitl_config = HITLConfig.from_global_config(global_config)
+                    else:
+                        hitl_config = HITLConfig()
+                    hitl_context = HITLContext(config=hitl_config, llm_tools=llm_tools)
+                    _push_log(log_queue, "HITL context initialized (PostgreSQL)")
+            except Exception as e:
+                _push_log(log_queue, f"HITL init failed: {e}", level="WARNING")
 
         if analysis_mode == "llm_exclusive":
             # LLM-exclusive mode: CodebaseLLMAgent
             _push_log(log_queue, "Mode: LLM-Exclusive Code Review")
             from agents.codebase_llm_agent import CodebaseLLMAgent
+
+            # Phase 1: File Discovery
+            phase_statuses[1] = "in_progress"
+            result_store["phase_statuses"] = phase_statuses
+            _push_log(log_queue, "Phase 1: Discovering files in codebase...")
 
             agent = CodebaseLLMAgent(
                 codebase_path=codebase_path,
@@ -245,17 +337,122 @@ def run_analysis_background(
                 hitl_context=hitl_context,
             )
 
-            # Run analysis
+            phase_statuses[1] = "completed"
+
+            # Phase 2-4: LLM Analysis (bulk of the work)
+            phase_statuses[2] = "in_progress"
+            result_store["phase_statuses"] = phase_statuses
+            _push_log(log_queue, "Phase 2-4: Running LLM analysis...")
+
+            # Run LLM analysis first (populates agent.results)
             report_path = agent.run_analysis(
                 output_filename="detailed_code_review.xlsx",
             )
 
+            phase_statuses[2] = "completed"
+            phase_statuses[3] = "completed"
+            phase_statuses[4] = "completed"
+            result_store["phase_statuses"] = phase_statuses
+
+            # Run deep static adapters if enabled (after LLM analysis)
+            adapter_results = None
+            if config.get("enable_adapters", False):
+                phase_statuses[5] = "in_progress"
+                result_store["phase_statuses"] = phase_statuses
+                _push_log(log_queue, "Phase 5: Running deep static analysis adapters...")
+                try:
+                    from agents.core.metrics_calculator import MetricsCalculator
+                    mc = MetricsCalculator(
+                        codebase_path=codebase_path,
+                        output_dir=output_dir,
+                        enable_adapters=True,
+                    )
+                    # Build file_cache from codebase files (not from LLM results)
+                    # NOTE: adapters expect "source" key for file contents
+                    file_cache = []
+                    gathered = agent._gather_files()
+                    for fpath in gathered:
+                        try:
+                            rel = os.path.relpath(str(fpath), codebase_path)
+                        except ValueError:
+                            rel = str(fpath)
+                        source = ""
+                        try:
+                            with open(str(fpath), "r", encoding="utf-8", errors="replace") as f:
+                                source = f.read()
+                        except Exception:
+                            pass
+                        file_cache.append({
+                            "file_path": str(fpath),
+                            "file_relative_path": rel,
+                            "file_name": os.path.basename(str(fpath)),
+                            "source": source,
+                        })
+                    adapter_results = mc._run_adapters(file_cache, {})
+                    # Log per-adapter results for diagnostics
+                    for aname, ares in adapter_results.items():
+                        avail = ares.get("tool_available", False)
+                        dcount = len(ares.get("details", []))
+                        grade = ares.get("grade", "?")
+                        _push_log(log_queue, f"  Adapter {aname}: grade={grade} details={dcount} tool_available={avail}")
+                    _push_log(log_queue, f"Deep adapters complete: {list(adapter_results.keys())}")
+
+                    # Count adapters that produced detail rows
+                    adapters_with_details = sum(
+                        1 for r in adapter_results.values() if r.get("details")
+                    )
+                    _push_log(log_queue, f"Adapters with findings: {adapters_with_details}/{len(adapter_results)}")
+
+                    # Re-generate Excel with adapter sheets appended
+                    if adapter_results and report_path:
+                        try:
+                            agent._generate_excel_report(
+                                report_path,
+                                adapter_results=adapter_results,
+                            )
+                            _push_log(log_queue, "Excel report regenerated with adapter sheets.")
+                        except Exception as regen_err:
+                            _push_log(log_queue, f"Excel regen with adapters failed: {regen_err}", level="WARNING")
+                except Exception as adp_err:
+                    _push_log(log_queue, f"Deep adapters failed: {adp_err}", level="WARNING")
+                    adapter_results = None
+                phase_statuses[5] = "completed"
+            else:
+                phase_statuses[5] = "completed"
+
+            # Phase 6: Report Generation
+            phase_statuses[6] = "in_progress"
+            result_store["phase_statuses"] = phase_statuses
+
             # Store results
             result_store["analysis_results"] = getattr(agent, "results", [])
             result_store["report_path"] = report_path
+            result_store["adapter_results"] = adapter_results
             result_store["analysis_mode"] = "llm_exclusive"
             result_store["status"] = "success"
             _push_log(log_queue, f"LLM analysis complete. Report: {report_path}")
+
+            phase_statuses[6] = "completed"
+
+            # Phase 7: Vector DB ingestion (if enabled)
+            phase_statuses[7] = "in_progress"
+            result_store["phase_statuses"] = phase_statuses
+
+            if config.get("enable_vector_db") and getattr(agent, "results", None):
+                try:
+                    import os as _os
+                    parseddata_dir = _os.path.join(output_dir, "parseddata")
+                    _os.makedirs(parseddata_dir, exist_ok=True)
+                    ndjson_out = _os.path.join(parseddata_dir, "llm_review_vector.ndjson")
+                    agent._write_vector_ndjson(ndjson_out)
+                    _push_log(log_queue, f"Vector-ready NDJSON written: {ndjson_out}")
+
+                    from db.vectordb_pipeline import VectorDbPipeline
+                    pipeline = VectorDbPipeline()
+                    pipeline.run()
+                    _push_log(log_queue, "Vector DB ingestion complete — chat is now available")
+                except Exception as vec_err:
+                    _push_log(log_queue, f"Vector DB ingestion skipped: {vec_err}", level="WARNING")
 
         else:
             # Standard mode: StaticAnalyzerAgent
@@ -283,6 +480,7 @@ def run_analysis_background(
             result_store["analysis_results"] = results.get("file_cache", [])
             result_store["analysis_metrics"] = results.get("health_metrics", {})
             result_store["health_report_path"] = results.get("health_report_path")
+            result_store["adapter_results"] = results.get("adapter_results", {})
             result_store["analysis_mode"] = "static"
             result_store["status"] = "success"
             _push_log(log_queue, "Static analysis pipeline complete.")
@@ -292,15 +490,39 @@ def run_analysis_background(
             phase_statuses[p] = "completed"
         result_store["phase_statuses"] = phase_statuses
 
+        # Finalize telemetry
+        if telemetry and run_id:
+            duration = time.time() - start_time
+            results = result_store.get("analysis_results", [])
+            issues_total = len(results) if isinstance(results, list) else 0
+            telemetry.finish_run(
+                run_id=run_id,
+                status="completed",
+                files_analyzed=config.get("max_files", 0),
+                issues_total=issues_total,
+                duration_seconds=duration,
+                metadata={"use_ccls": config.get("use_ccls", False)},
+            )
+
     except Exception as e:
         _push_log(log_queue, f"Analysis failed: {e}", level="ERROR")
         result_store["status"] = f"error: {e}"
         logger.error("Background analysis failed", exc_info=True)
+        if telemetry and run_id:
+            telemetry.finish_run(
+                run_id=run_id,
+                status="failed",
+                duration_seconds=time.time() - start_time,
+                metadata={"error": str(e)},
+            )
 
     finally:
-        # Restore stdout and remove handler
+        # Restore stdout and remove handlers
         sys.stdout = original_stdout
         root_logger.removeHandler(log_handler)
+        if debug_fh:
+            debug_fh.close()
+            root_logger.removeHandler(debug_fh)
         _push_log(log_queue, "__DONE__")
 
 
@@ -335,15 +557,36 @@ def run_fixer_background(
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
+    # Debug file handler
+    output_dir = config.get("output_dir", "./out")
+    debug_fh = _setup_debug_file_handler(output_dir)
+    if debug_fh:
+        root_logger.addHandler(debug_fh)
+        root_logger.setLevel(logging.DEBUG)
+
     original_stdout = sys.stdout
     console_capture = ConsoleCaptureHandler(log_queue)
     sys.stdout = console_capture
+
+    start_time = time.time()
+    telemetry = _get_telemetry()
+    run_id = ""
 
     try:
         directives_path = config.get("directives_path")
         codebase_path = config.get("codebase_path", "./codebase")
         output_dir = config.get("output_dir", "./out")
         dry_run = config.get("dry_run", False)
+
+        # Start telemetry run
+        if telemetry:
+            run_id = telemetry.start_run(
+                mode="fixer",
+                codebase_path=codebase_path,
+                llm_model=config.get("llm_model", ""),
+                metadata={"dry_run": dry_run, "directives": directives_path},
+            )
+            result_store["telemetry_run_id"] = run_id
 
         _push_log(log_queue, f"Starting fixer workflow on: {codebase_path}")
         _push_log(log_queue, f"Directives: {directives_path}")
@@ -409,14 +652,232 @@ def run_fixer_background(
         phase_statuses[4] = "completed"
         _push_log(log_queue, "Fixer workflow complete.")
 
+        # Finalize telemetry
+        if telemetry and run_id:
+            duration = time.time() - start_time
+            fr = fixer_result or {}
+            telemetry.finish_run(
+                run_id=run_id,
+                status="completed",
+                issues_fixed=fr.get("fixed_count", 0),
+                issues_skipped=fr.get("skipped_count", 0),
+                issues_failed=fr.get("failed_count", 0),
+                duration_seconds=duration,
+            )
+
     except Exception as e:
         _push_log(log_queue, f"Fixer workflow failed: {e}", level="ERROR")
         result_store["fixer_status"] = f"error: {e}"
         logger.error("Background fixer failed", exc_info=True)
+        if telemetry and run_id:
+            telemetry.finish_run(
+                run_id=run_id,
+                status="failed",
+                duration_seconds=time.time() - start_time,
+                metadata={"error": str(e)},
+            )
 
     finally:
         sys.stdout = original_stdout
         root_logger.removeHandler(log_handler)
+        if debug_fh:
+            debug_fh.close()
+            root_logger.removeHandler(debug_fh)
+        _push_log(log_queue, "__DONE__")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Patch analysis background runner
+# ═══════════════════════════════════════════════════════════════════════════════
+
+PATCH_PHASES = {
+    1: "Reading Source & Patch",
+    2: "Parsing Unified Diff",
+    3: "Applying Patch",
+    4: "LLM Analysis (Original vs Patched)",
+    5: "Static Analysis (Adapters)",
+    6: "Diffing Findings",
+    7: "Report Generation",
+}
+
+
+def run_patch_analysis_background(
+    config: Dict[str, Any],
+    log_queue: Queue,
+    result_store: Dict[str, Any],
+) -> None:
+    """
+    Run patch analysis in a background thread.
+
+    Args:
+        config: Patch analysis configuration dict with keys:
+            - file_path (str): Path to original source file
+            - patch_file (str): Path to .patch/.diff file
+            - modified_file (str, optional): Path to already-modified file
+            - output_dir (str): Output directory
+            - enable_adapters (bool): Enable deep static adapters
+        log_queue: Queue to push log messages to
+        result_store: Shared dict to store results when complete
+    """
+    phase_statuses = {i: "pending" for i in range(1, 8)}
+    result_store["phase_statuses"] = phase_statuses
+
+    # Install log capture
+    log_handler = LogCaptureHandler(log_queue, phase_tracker=phase_statuses)
+    log_handler.setFormatter(logging.Formatter("%(message)s"))
+    root_logger = logging.getLogger()
+    root_logger.addHandler(log_handler)
+
+    # Debug file handler
+    output_dir = config.get("output_dir", "./out")
+    debug_fh = _setup_debug_file_handler(output_dir)
+    if debug_fh:
+        root_logger.addHandler(debug_fh)
+        root_logger.setLevel(logging.DEBUG)
+
+    original_stdout = sys.stdout
+    console_capture = ConsoleCaptureHandler(log_queue)
+    sys.stdout = console_capture
+
+    start_time = time.time()
+    telemetry = _get_telemetry()
+    run_id = ""
+
+    try:
+        file_path = config.get("file_path", "")
+        patch_file = config.get("patch_file", "")
+        modified_file = config.get("modified_file", "")
+        output_dir = config.get("output_dir", "./out")
+        enable_adapters = config.get("enable_adapters", False)
+
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Start telemetry run
+        if telemetry:
+            run_id = telemetry.start_run(
+                mode="patch",
+                codebase_path=file_path,
+                metadata={"patch_file": patch_file, "modified_file": modified_file},
+            )
+            result_store["telemetry_run_id"] = run_id
+
+        _push_log(log_queue, f"Starting patch analysis")
+        _push_log(log_queue, f"  Original file: {file_path}")
+        _push_log(log_queue, f"  Patch file: {patch_file}")
+        if modified_file:
+            _push_log(log_queue, f"  Modified file: {modified_file}")
+
+        # If a modified file is provided but no patch file, generate a diff
+        if modified_file and not patch_file:
+            import subprocess as sp
+            _push_log(log_queue, "Generating diff from original and modified files...")
+            diff_path = os.path.join(output_dir, "_generated.patch")
+            try:
+                result = sp.run(
+                    ["diff", "-u", file_path, modified_file],
+                    capture_output=True, text=True, timeout=30,
+                )
+                with open(diff_path, "w", encoding="utf-8") as f:
+                    f.write(result.stdout)
+                patch_file = diff_path
+                _push_log(log_queue, f"  Generated patch: {diff_path}")
+            except Exception as e:
+                _push_log(log_queue, f"Failed to generate diff: {e}", level="ERROR")
+                result_store["status"] = f"error: {e}"
+                return
+
+        # Initialize GlobalConfig
+        global_config = None
+        try:
+            from utils.parsers.global_config_parser import GlobalConfig
+            global_config = GlobalConfig()
+        except Exception:
+            pass
+
+        # Initialize LLM
+        llm_tools = None
+        try:
+            from utils.common.llm_tools import LLMTools
+            llm_tools = LLMTools()
+            _push_log(log_queue, f"LLM initialized: {llm_tools.get_provider_info()}")
+        except Exception as e:
+            _push_log(log_queue, f"LLM init failed (continuing without): {e}", level="WARNING")
+
+        # Initialize HITL
+        hitl_context = None
+        try:
+            from hitl import HITLContext, HITLConfig, HITL_AVAILABLE
+            if HITL_AVAILABLE:
+                hitl_config = HITLConfig()
+                hitl_context = HITLContext(config=hitl_config, llm_tools=llm_tools)
+        except Exception:
+            pass
+
+        # Run patch analysis
+        from agents.codebase_patch_agent import CodebasePatchAgent
+
+        agent = CodebasePatchAgent(
+            file_path=file_path,
+            patch_file=patch_file,
+            output_dir=output_dir,
+            config=global_config,
+            llm_tools=llm_tools,
+            hitl_context=hitl_context,
+            enable_adapters=enable_adapters,
+            verbose=True,
+        )
+
+        excel_path = os.path.join(output_dir, "detailed_code_review.xlsx")
+        patch_result = agent.run_analysis(excel_path=excel_path)
+
+        # Store results
+        result_store["patch_result"] = patch_result
+        result_store["report_path"] = patch_result.get("excel_path", "")
+        result_store["analysis_results"] = patch_result.get("findings", [])
+        result_store["analysis_mode"] = "patch"
+        result_store["status"] = patch_result.get("status", "success")
+
+        _push_log(
+            log_queue,
+            f"Patch analysis complete: "
+            f"{patch_result.get('new_issue_count', 0)} new issues found, "
+            f"{patch_result.get('patched_issue_count', 0)} total in patched code"
+        )
+
+        # Mark all phases completed
+        for p in phase_statuses:
+            phase_statuses[p] = "completed"
+        result_store["phase_statuses"] = phase_statuses
+
+        # Finalize telemetry
+        if telemetry and run_id:
+            pr = patch_result or {}
+            telemetry.finish_run(
+                run_id=run_id,
+                status="completed",
+                files_analyzed=1,
+                issues_total=pr.get("new_issue_count", 0),
+                duration_seconds=time.time() - start_time,
+            )
+
+    except Exception as e:
+        _push_log(log_queue, f"Patch analysis failed: {e}", level="ERROR")
+        result_store["status"] = f"error: {e}"
+        logger.error("Background patch analysis failed", exc_info=True)
+        if telemetry and run_id:
+            telemetry.finish_run(
+                run_id=run_id,
+                status="failed",
+                duration_seconds=time.time() - start_time,
+                metadata={"error": str(e)},
+            )
+
+    finally:
+        sys.stdout = original_stdout
+        root_logger.removeHandler(log_handler)
+        if debug_fh:
+            debug_fh.close()
+            root_logger.removeHandler(debug_fh)
         _push_log(log_queue, "__DONE__")
 
 

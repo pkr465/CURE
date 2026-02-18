@@ -16,6 +16,9 @@ class HITLConfig:
     """Configuration for the Human-in-the-Loop RAG pipeline."""
 
     # ── Storage ──────────────────────────────────────────────────────────
+    # PostgreSQL connection string (preferred); falls back to GlobalConfig
+    postgres_connection: Optional[str] = None
+    # Legacy SQLite path (kept for backward compat, ignored when postgres is set)
     store_db_path: Path = field(default_factory=lambda: Path("./out/hitl/feedback.db"))
 
     # ── RAG retrieval ────────────────────────────────────────────────────
@@ -52,7 +55,9 @@ class HITLConfig:
         get_bool = getattr(global_config, "get_bool", lambda k, d=False: d)
 
         raw_path = get("hitl.store_db_path", str(cls.store_db_path))
+        pg_conn = get("POSTGRES_CONNECTION") or get("database.connection")
         return cls(
+            postgres_connection=pg_conn,
             store_db_path=Path(raw_path),
             rag_top_k=get_int("hitl.rag_top_k", cls.rag_top_k),
             rag_similarity_threshold=float(

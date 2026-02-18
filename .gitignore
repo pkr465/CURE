@@ -14,3 +14,4 @@ out/
 
 # OS files
 .DS_Store
+ccls.log

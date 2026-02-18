@@ -1,6 +1,6 @@
 # Constraints for dp_main.c
 
-## 1. Issue Identification Rules (Specific False Positives)
+## 1. Issue Identification Rules
 
 ### A. Memory Operations
 *   **Target**: `qdf_mem_copy` / `num_entries++`
@@ -24,7 +24,7 @@
 
 ---
 
-## 2. Issue Resolution Rules (Fixing Guidelines)
+## 2. Issue Resolution Rules
 
 ### A. IRQ Map Handling
 *   **Target**: `irq_id_map` / `num_irq` assignments

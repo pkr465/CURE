@@ -1,6 +1,7 @@
-"""AST-level complexity analysis using Lizard."""
+"""AST-level complexity analysis using Lizard (with regex fallback)."""
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from agents.adapters.base_adapter import BaseStaticAdapter
@@ -19,7 +20,33 @@ class ASTComplexityAdapter(BaseStaticAdapter):
 
     Measures cyclomatic complexity, nesting depth, parameter count, function length.
     Flags high-complexity functions and deep nesting as red flags.
+
+    Falls back to regex-based analysis when Lizard is not installed.
     """
+
+    # C/C++ keywords that look like functions but aren't
+    _C_KEYWORDS = frozenset({
+        "if", "else", "for", "while", "do", "switch", "case", "return",
+        "sizeof", "typeof", "alignof", "static_assert", "catch", "throw",
+        "new", "delete", "try", "namespace", "using", "typedef",
+    })
+
+    # Regex to match C/C++ function definitions
+    _FUNC_RE = re.compile(
+        r'^[ \t]*'                              # leading whitespace
+        r'(?:[\w:*&<>,\s]+?)'                   # return type (non-greedy)
+        r'\s+'                                   # space before name
+        r'([\w:~]+)'                             # function name (capture group 1)
+        r'\s*\(([^)]*)\)'                        # parameters (capture group 2)
+        r'\s*(?:const|override|noexcept|final)*'  # optional qualifiers
+        r'\s*\{',                                # opening brace
+        re.MULTILINE,
+    )
+
+    # Decision-point keywords that contribute to cyclomatic complexity
+    _CC_KEYWORDS = re.compile(
+        r'\b(?:if|else\s+if|for|while|do|case|catch|\?\s*:|\&\&|\|\|)\b'
+    )
 
     def __init__(self, debug: bool = False):
         """
@@ -32,8 +59,148 @@ class ASTComplexityAdapter(BaseStaticAdapter):
         self.lizard_available = LIZARD_AVAILABLE
         if not self.lizard_available:
             self.logger.warning(
-                "Lizard not available. Install with: pip install lizard"
+                "Lizard not available — using regex fallback. "
+                "For best results: pip install lizard"
             )
+
+    # ── Regex-based fallback ──────────────────────────────────────────────
+
+    def _find_matching_brace(self, source: str, open_pos: int) -> int:
+        """Find the closing brace matching the one at *open_pos*."""
+        depth = 0
+        in_string = False
+        in_char = False
+        in_line_comment = False
+        in_block_comment = False
+        i = open_pos
+        while i < len(source):
+            c = source[i]
+            # Handle string/char/comment state
+            if in_line_comment:
+                if c == '\n':
+                    in_line_comment = False
+            elif in_block_comment:
+                if c == '*' and i + 1 < len(source) and source[i + 1] == '/':
+                    in_block_comment = False
+                    i += 1
+            elif in_string:
+                if c == '\\':
+                    i += 1  # skip escaped char
+                elif c == '"':
+                    in_string = False
+            elif in_char:
+                if c == '\\':
+                    i += 1
+                elif c == "'":
+                    in_char = False
+            else:
+                if c == '/' and i + 1 < len(source):
+                    nxt = source[i + 1]
+                    if nxt == '/':
+                        in_line_comment = True
+                    elif nxt == '*':
+                        in_block_comment = True
+                elif c == '"':
+                    in_string = True
+                elif c == "'":
+                    in_char = True
+                elif c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        return i
+            i += 1
+        return -1
+
+    def _compute_max_nesting(self, body: str) -> int:
+        """Estimate max nesting depth from brace counts in function body."""
+        max_depth = 0
+        depth = 0
+        in_string = False
+        in_line_comment = False
+        in_block_comment = False
+        i = 0
+        while i < len(body):
+            c = body[i]
+            if in_line_comment:
+                if c == '\n':
+                    in_line_comment = False
+            elif in_block_comment:
+                if c == '*' and i + 1 < len(body) and body[i + 1] == '/':
+                    in_block_comment = False
+                    i += 1
+            elif in_string:
+                if c == '\\':
+                    i += 1
+                elif c == '"':
+                    in_string = False
+            else:
+                if c == '/' and i + 1 < len(body):
+                    nxt = body[i + 1]
+                    if nxt == '/':
+                        in_line_comment = True
+                    elif nxt == '*':
+                        in_block_comment = True
+                elif c == '"':
+                    in_string = True
+                elif c == '{':
+                    depth += 1
+                    max_depth = max(max_depth, depth)
+                elif c == '}':
+                    depth -= 1
+            i += 1
+        return max_depth
+
+    def _regex_analyze_file(self, file_path: str, source: str) -> List[Dict]:
+        """Extract function metrics using regex (fallback when Lizard unavailable)."""
+        functions = []
+        for m in self._FUNC_RE.finditer(source):
+            func_name = m.group(1)
+            # Skip C/C++ keywords that look like function calls
+            bare_name = func_name.split("::")[-1].lstrip("~")
+            if bare_name in self._C_KEYWORDS:
+                continue
+            params_str = m.group(2).strip()
+            # Find the opening brace
+            brace_pos = source.find('{', m.start())
+            if brace_pos == -1:
+                continue
+            end_pos = self._find_matching_brace(source, brace_pos)
+            if end_pos == -1:
+                continue
+            body = source[brace_pos:end_pos + 1]
+            start_line = source[:m.start()].count('\n') + 1
+            end_line = source[:end_pos].count('\n') + 1
+            length = end_line - start_line + 1
+
+            # Count parameters
+            if params_str and params_str != 'void':
+                param_count = params_str.count(',') + 1
+            else:
+                param_count = 0
+
+            # Cyclomatic complexity: 1 + decision points
+            cc = 1 + len(self._CC_KEYWORDS.findall(body))
+
+            # Max nesting depth
+            nesting = self._compute_max_nesting(body)
+
+            functions.append({
+                "file": file_path,
+                "name": func_name,
+                "long_name": func_name,
+                "start_line": start_line,
+                "end_line": end_line,
+                "length": length,
+                "cyclomatic_complexity": cc,
+                "token_count": len(body.split()),
+                "parameter_count": param_count,
+                "max_nesting_depth": nesting,
+            })
+        return functions
+
+    # ── Main entry point ──────────────────────────────────────────────────
 
     def analyze(
         self,
@@ -44,6 +211,8 @@ class ASTComplexityAdapter(BaseStaticAdapter):
         """
         Analyze C/C++ files for complexity metrics.
 
+        Uses Lizard when available; falls back to regex-based analysis otherwise.
+
         Args:
             file_cache: List of file entries with "file_relative_path" and "source" keys.
             ccls_navigator: Optional CCLS navigator (unused here).
@@ -52,11 +221,8 @@ class ASTComplexityAdapter(BaseStaticAdapter):
         Returns:
             Standard analysis result dict with score, grade, metrics, issues, details.
         """
-        # Step 1: Check tool availability
-        if not self.lizard_available:
-            return self._handle_tool_unavailable(
-                "Lizard", "Install with: pip install lizard"
-            )
+
+        using_fallback = not self.lizard_available
 
         # Step 2: Filter to C/C++ files
         c_cpp_suffixes = (".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx")
@@ -76,31 +242,32 @@ class ASTComplexityAdapter(BaseStaticAdapter):
             source_code = entry.get("source", "")
 
             try:
-                # Use Lizard to analyze the file
-                file_info = lizard.analyze_file.analyze_source_code(
-                    file_path, source_code
-                )
-
-                # Extract function metrics from the analyzed file
-                for func in file_info.function_list:
-                    func_dict = {
-                        "file": file_path,
-                        "name": func.name,
-                        "long_name": getattr(func, "long_name", func.name),
-                        "start_line": func.start_line,
-                        "end_line": func.end_line,
-                        "length": func.length,
-                        "cyclomatic_complexity": func.cyclomatic_complexity,
-                        "token_count": getattr(func, "token_count", 0),
-                        "parameter_count": func.parameter_count,
-                        "max_nesting_depth": getattr(func, "max_nesting_depth", 0),
-                    }
-                    all_functions.append(func_dict)
+                if self.lizard_available:
+                    # Use Lizard to analyze the file
+                    file_info = lizard.analyze_file.analyze_source_code(
+                        file_path, source_code
+                    )
+                    for func in file_info.function_list:
+                        func_dict = {
+                            "file": file_path,
+                            "name": func.name,
+                            "long_name": getattr(func, "long_name", func.name),
+                            "start_line": func.start_line,
+                            "end_line": func.end_line,
+                            "length": func.length,
+                            "cyclomatic_complexity": func.cyclomatic_complexity,
+                            "token_count": getattr(func, "token_count", 0),
+                            "parameter_count": func.parameter_count,
+                            "max_nesting_depth": getattr(func, "max_nesting_depth", 0),
+                        }
+                        all_functions.append(func_dict)
+                else:
+                    # Regex fallback
+                    funcs = self._regex_analyze_file(file_path, source_code)
+                    all_functions.extend(funcs)
 
                 if self.debug:
-                    self.logger.debug(
-                        f"Analyzed {file_path}: {len(file_info.function_list)} functions"
-                    )
+                    self.logger.debug(f"Analyzed {file_path}: functions found so far {len(all_functions)}")
 
             except Exception as e:
                 self.logger.error(f"Error analyzing {file_path}: {e}")
@@ -195,6 +362,7 @@ class ASTComplexityAdapter(BaseStaticAdapter):
 
         metrics = {
             "tool_available": True,
+            "analysis_mode": "regex_fallback" if using_fallback else "lizard",
             "files_analyzed": len(cpp_files),
             "functions_analyzed": len(all_functions),
             "avg_cyclomatic_complexity": round(avg_cc, 2),

@@ -66,6 +66,19 @@ class JsonFlattener:
                 f"JsonFlattener: unable to interpret input as dict, path, or JSON string: {e}"
             ) from e
 
+    @staticmethod
+    def _enrich_file_fields(record: Dict[str, Any]) -> None:
+        """Populate ``file_relative_path`` and ``file_name`` from ``file_path``.
+
+        The NDJSONProcessor UUID keys reference ``file_relative_path`` and
+        ``file_name``, but flattened records only carry ``file_path``.  This
+        helper bridges the gap so file identity is included in dedup UUIDs.
+        """
+        fp = record.get("file_path")
+        if fp and isinstance(fp, str):
+            record.setdefault("file_relative_path", fp)
+            record.setdefault("file_name", Path(fp).name)
+
     def _add_record_if_valid(
         self,
         records: List[Dict[str, Any]],
@@ -84,6 +97,8 @@ class JsonFlattener:
         # If every value is None/empty, skip
         if all(v is None or v == "" for v in record.values()):
             return
+        # Ensure file_relative_path / file_name are present for UUID dedup
+        self._enrich_file_fields(record)
         records.append(record)
 
     # ------------------------------------------------------------------
@@ -304,9 +319,10 @@ class JsonFlattener:
             for idx, step in enumerate(mod_steps):
                 if not isinstance(step, dict):
                     continue
+                step_title = step.get("title", idx)
                 rec = {
                     "record_type": "modularization_step",
-                    "id": f"mod_step::{idx}",
+                    "id": f"mod_step::{step_title}",
                     "source": "healthreport.json",
                     "step_index": idx,
                     "title": step.get("title"),
@@ -347,11 +363,12 @@ class JsonFlattener:
             for idx, check in enumerate(checks):
                 if not isinstance(check, dict):
                     continue
+                check_name = check.get("name", idx)
                 rec = {
                     "record_type": "validation_check",
-                    "id": f"validation_check::{idx}",
+                    "id": f"validation_check::{check_name}",
                     "source": "healthreport.json",
-                    "check_name": check.get("name"),
+                    "check_name": check_name,
                     "status": check.get("status"),
                     "details": check.get("details"),
                     "severity": check.get("severity"),
@@ -370,14 +387,17 @@ class JsonFlattener:
             for idx, v in enumerate(quality_violations):
                 if not isinstance(v, dict):
                     continue
+                q_file = v.get("file", "")
+                q_line = v.get("line", "")
+                q_rule = v.get("rule", "")
                 rec = {
                     "record_type": "quality_violation",
-                    "id": f"quality_violation::{idx}",
+                    "id": f"quality_violation::{q_file}::{q_line}::{q_rule}",
                     "source": "healthreport.json",
-                    "rule": v.get("rule"),
+                    "rule": q_rule,
                     "severity": v.get("severity"),
-                    "file_path": v.get("file"),
-                    "line": v.get("line"),
+                    "file_path": q_file,
+                    "line": q_line,
                     "message": v.get("message"),
                 }
                 self._add_record_if_valid(records, rec)
@@ -394,14 +414,17 @@ class JsonFlattener:
             for idx, v in enumerate(security_violations):
                 if not isinstance(v, dict):
                     continue
+                s_file = v.get("file", "")
+                s_line = v.get("line", "")
+                s_rule = v.get("rule", "")
                 rec = {
                     "record_type": "security_violation",
-                    "id": f"security_violation::{idx}",
+                    "id": f"security_violation::{s_file}::{s_line}::{s_rule}",
                     "source": "healthreport.json",
-                    "rule": v.get("rule"),
+                    "rule": s_rule,
                     "severity": v.get("severity"),
-                    "file_path": v.get("file"),
-                    "line": v.get("line"),
+                    "file_path": s_file,
+                    "line": s_line,
                     "message": v.get("message"),
                 }
                 self._add_record_if_valid(records, rec)
@@ -418,12 +441,14 @@ class JsonFlattener:
             for idx, fn in enumerate(top_functions):
                 if not isinstance(fn, dict):
                     continue
+                c_file = fn.get("file", "")
+                c_func = fn.get("name", "")
                 rec = {
                     "record_type": "complexity_hotspot",
-                    "id": f"complexity_hotspot::{idx}",
+                    "id": f"complexity_hotspot::{c_file}::{c_func}",
                     "source": "healthreport.json",
-                    "function": fn.get("name"),
-                    "file_path": fn.get("file"),
+                    "function": c_func,
+                    "file_path": c_file,
                     "cyclomatic_complexity": fn.get("cyclomatic_complexity"),
                     "cognitive_complexity": fn.get("cognitive_complexity"),
                     "lines_of_code": fn.get("lines_of_code"),
@@ -489,13 +514,15 @@ class JsonFlattener:
             for idx, issue in enumerate(critical_issues):
                 if not isinstance(issue, dict):
                     continue
+                ci_title = issue.get("title", idx)
+                ci_category = issue.get("category", "")
                 rec = {
                     "record_type": "critical_issue",
-                    "id": f"critical_issue::{idx}",
+                    "id": f"critical_issue::{ci_title}::{ci_category}",
                     "source": "healthreport.json",
-                    "title": issue.get("title"),
+                    "title": ci_title,
                     "severity": issue.get("severity"),
-                    "category": issue.get("category"),
+                    "category": ci_category,
                     "details": issue.get("details"),
                     "recommendations": issue.get("recommendations"),
                 }
@@ -573,14 +600,17 @@ class JsonFlattener:
                 for idx, detail in enumerate(details):
                     if not isinstance(detail, dict):
                         continue
+                    af_file = detail.get("file", "")
+                    af_line = detail.get("line", "")
+                    af_func = detail.get("function", "")
                     rec = {
                         "record_type": "adapter_finding",
-                        "id": f"adapter_finding::{adapter_name}::{idx}",
+                        "id": f"adapter_finding::{adapter_name}::{af_file}::{af_line}::{af_func}",
                         "source": "healthreport.json",
                         "adapter_name": adapter_name,
-                        "file_path": detail.get("file"),
-                        "function": detail.get("function"),
-                        "line": detail.get("line"),
+                        "file_path": af_file,
+                        "function": af_func,
+                        "line": af_line,
                         "description": detail.get("description"),
                         "severity": detail.get("severity"),
                         "category": detail.get("category"),

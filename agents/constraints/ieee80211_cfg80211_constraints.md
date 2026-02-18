@@ -3,7 +3,7 @@
 This file defines specific static analysis constraints for the Linux Kernel Interface layer. 
 Context: This file bridges the Linux `cfg80211` subsystem and the WLAN driver.
 
-## 1. Issue Identification Rules (False Positives)
+## 1. Issue Identification Rules
 
 ### A. Kernel Object Lifecycle (Null Pointer Dereference)
 **Rule:** **IGNORE** "Potential null pointer dereference" or "Uninitialized variable" for the following primary kernel objects.
@@ -44,7 +44,7 @@ Context: This file bridges the Linux `cfg80211` subsystem and the WLAN driver.
 
 ---
 
-## 2. Issue Resolution Rules (Fixing Guidelines)
+## 2. Issue Resolution Rules
 
 ### A. Return Codes & Error Handling
 **Rule:** **MUST USE** Standard Linux Kernel error codes.

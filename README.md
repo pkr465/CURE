@@ -13,6 +13,8 @@
 7. **Agentic Code Repair**: Human-in-the-loop `CodebaseFixerAgent` applies LLM-suggested fixes guided by reviewer feedback.
 8. **Multi-Provider LLM**: Supports Anthropic Claude, QGenie, Google Vertex AI, and Azure OpenAI via `provider::model` format.
 9. **Visualization**: Generates an HTML health report and provides a Streamlit UI dashboard.
+10. **Telemetry & Analytics**: Silent PostgreSQL-backed telemetry tracks issues found/fixed, LLM usage, run durations, and fix success rates with a built-in dashboard.
+11. **HITL Feedback Store**: PostgreSQL-backed persistent store for human feedback decisions and constraint rules, enabling agents to learn from accumulated human review history.
 
 ---
 
@@ -112,8 +114,10 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 │   └── vector_db/
 │       └── document_processor.py       # Vector document processing
 ├── db/
-│   ├── postgres_db_setup.py            # PostgreSQL schema setup
+│   ├── postgres_db_setup.py            # PostgreSQL schema setup (vector + telemetry + HITL)
 │   ├── postgres_api.py                 # PostgreSQL API helpers
+│   ├── telemetry_service.py            # Silent telemetry collector (TelemetryService)
+│   ├── schema_telemetry.sql            # SQL schema for telemetry & HITL tables
 │   ├── json_flattner.py                # JSON → flat JSON converter
 │   ├── ndjson_processor.py             # NDJSON processor for embeddings
 │   ├── ndjson_writer.py                # NDJSON file writer
@@ -134,9 +138,9 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 │   └── utils.py                        # Shared utilities
 ├── hitl/                               # Human-in-the-Loop RAG pipeline
 │   ├── __init__.py                     # Module exports, HITL_AVAILABLE flag
-│   ├── config.py                       # HITLConfig dataclass
+│   ├── config.py                       # HITLConfig dataclass (PostgreSQL connection)
 │   ├── schemas.py                      # Data models (FeedbackDecision, ConstraintRule)
-│   ├── feedback_store.py               # SQLite persistent store
+│   ├── feedback_store.py               # PostgreSQL persistent store (migrated from SQLite)
 │   ├── excel_feedback_parser.py        # Parse Excel human feedback
 │   ├── constraint_parser.py            # Parse *_constraints.md files
 │   ├── rag_retriever.py                # RAG query engine
@@ -156,8 +160,11 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 ├── prompts/
 │   └── codebase_analysis_prompt.py     # LLM analysis prompt template
 └── ui/
-    ├── streamlit_app.py                # Streamlit dashboard
-    ├── streamlit_tools.py              # Custom Streamlit helpers
+    ├── app.py                          # Main Streamlit app (7 workflow tabs)
+    ├── streamlit_tools.py              # Custom Streamlit helpers (sidebar, themes)
+    ├── background_workers.py           # Thread runners with telemetry instrumentation
+    ├── feedback_helpers.py             # Excel feedback persistence helpers
+    ├── qa_inspector.py                 # QA validation inspector
     └── launch_streamlit.py             # Streamlit launcher
 ```
 
@@ -171,43 +178,49 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 
 
 
-**Install PostgreSQL** (required for vector DB pipeline):
+**Install PostgreSQL and initialize the database** (required for vector DB pipeline):
 
+**macOS / Linux (Option A — automated bootstrap):**
 ```bash
-# Ubuntu/Debian
-sudo apt-get update
-sudo apt-get install postgresql postgresql-client postgresql-16-pgvector
-sudo systemctl start postgresql
+sudo ./bootstrap_db.sh
 ```
+The script auto-detects the installed PostgreSQL version, installs pgvector (building from source if the Homebrew bottle doesn't match your PG version), creates the user, database, extension, and permissions.
 
-### 2. Database Initialization
-
+**macOS (Option B — manual Homebrew setup):**
 ```bash
-sudo -u postgres psql
+# Install PostgreSQL and start the service
+brew install postgresql@16
+brew services start postgresql@16
+
+# Install pgvector (build from source if brew bottle doesn't cover your PG version)
+brew install pgvector
+# If CREATE EXTENSION fails later, build from source:
+cd /tmp && git clone --branch v0.8.1 --depth 1 https://github.com/pgvector/pgvector.git
+cd pgvector && PG_CONFIG=/opt/homebrew/opt/postgresql@16/bin/pg_config make && sudo make install
+
+# Create the database, user, and extension
+/opt/homebrew/opt/postgresql@16/bin/psql -d postgres -c "CREATE USER codebase_analytics_user WITH PASSWORD 'postgres';"
+/opt/homebrew/opt/postgresql@16/bin/psql -d postgres -c "CREATE DATABASE codebase_analytics_db OWNER codebase_analytics_user;"
+/opt/homebrew/opt/postgresql@16/bin/psql -d codebase_analytics_db -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
-```sql
--- 1. Create the application user
-CREATE USER codebase_analytics_user WITH PASSWORD 'postgres';
-
--- 2. Create the database
-CREATE DATABASE codebase_analytics_db OWNER codebase_analytics_user;
-
--- 3. Connect to the database
-\c codebase_analytics_db
-
--- 4. Install Vector Extension
-CREATE EXTENSION IF NOT EXISTS vector;
-
--- 5. Grant Permissions
-GRANT ALL PRIVILEGES ON DATABASE codebase_analytics_db TO codebase_analytics_user;
-GRANT USAGE ON SCHEMA public TO codebase_analytics_user;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO codebase_analytics_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO codebase_analytics_user;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO codebase_analytics_user;
+**Windows (PowerShell — run as Administrator):**
+```powershell
+.\bootstrap_db.ps1
 ```
 
-### 3. Python Environment Setup
+All options install PostgreSQL with pgvector, create the application user and database, enable the vector extension, and grant all required permissions. Defaults match `global_config.yaml`. Override with environment variables if needed:
+
+## Optional
+```bash
+# macOS / Linux
+DB_USER=myuser DB_PASSWORD=mypass DB_NAME=mydb sudo -E ./bootstrap_db.sh
+
+# Windows PowerShell
+$env:DB_USER="myuser"; $env:DB_PASSWORD="mypass"; $env:DB_NAME="mydb"; .\bootstrap_db.ps1
+```
+
+### 2. Python Environment Setup
 
 ```bash
 sudo su
@@ -224,7 +237,7 @@ source .venv/bin/activate
 python --version
 ```
 
-### 4. Install Dependencies
+### 3. Install Dependencies
 
 ```bash
 pip install --upgrade pip
@@ -260,16 +273,7 @@ echo $CC
 echo $CXX
 ```
 
-### For advanced CCLS builds from source (optional): 
-```bash
-git clone --depth=1 --recursive https://github.com/MaskRay/ccls
-cd ccls
-cmake -S . -B Release -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_PREFIX_PATH=/usr/lib/llvm-14
-cmake --build Release --target install
-```
-
-### 5. Configuration
+### 4. Configuration
 
 Copy and customize the global configuration:
 
@@ -407,7 +411,7 @@ Create a file (e.g., `agents/constraints/my_driver.c_constraints.md`) using this
 | `--enable-hitl`                 | Enable Human-in-the-Loop RAG feedback system                              | `false`                  |
 | `--hitl-feedback-excel`         | Path to `detailed_code_review.xlsx` with human feedback                   | `None`                   |
 | `--hitl-constraints-dir`        | Directory to search for `*_constraints.md` files                          | `None`                   |
-| `--hitl-store-path`             | Path to HITL feedback store (SQLite database)                             | `./out/hitl/feedback.db` |
+| `--hitl-store-path`             | Legacy (deprecated) — HITL now uses PostgreSQL                            | *(ignored)*              |
 | `-v, --verbose`                 | Verbose logging                                                           |
 | `-D, --debug`                   | Debug logging                                                             |
 | `--quiet`                       | Suppress non-error output                                                 |
@@ -480,11 +484,12 @@ python main.py --llm-exclusive --llm-model "azure::gpt-4.1" \
 ### Streamlit Dashboard
 
 ```bash
-# Requirement: Run the pipeline with --enable-vector-db first
-python -m streamlit run ui/streamlit_app.py --server.port 8502
+python -m streamlit run ui/app.py --server.port 8502
 ```
 
 Access at: `http://localhost:8502`
+
+The UI provides seven workflow tabs: **Analyze**, **Pipeline**, **Review**, **Fix & QA**, **Audit**, **Constraints**, and **Telemetry**. The sidebar includes toggles for enabling HITL and Telemetry.
 
 ---
 
@@ -549,7 +554,61 @@ The `global_config.yaml` file provides hierarchical, typed configuration with `$
 | `dependency_builder` | CCLS executable, timeouts, BFS depth, connection pool |
 | `excel`              | Report styling (colors, column widths, freeze/filter) |
 | `mermaid`            | Diagram rendering configuration                       |
+| `hitl`               | HITL RAG pipeline — feedback store, constraint parsing |
+| `telemetry`          | Silent usage telemetry (enable/disable)               |
 | `logging`            | Log level, verbose/debug flags                        |
+
+---
+
+## Telemetry & Analytics
+
+CURE includes a silent, fire-and-forget telemetry system that records framework usage patterns into the same PostgreSQL database (`codebase_analytics_db`). Telemetry is enabled by default and can be toggled in `global_config.yaml` or the Streamlit sidebar.
+
+### What is tracked
+
+- **Run summaries**: mode (analysis/fixer/patch), status, duration, file count, issue counts by severity
+- **Fix outcomes**: issues fixed, skipped, and failed per fixer run
+- **LLM usage**: provider, model, token counts (prompt + completion), latency per call
+- **Granular events**: individual issue found/fixed/skipped events, phase transitions, export actions
+
+### Configuration
+
+```yaml
+# global_config.yaml
+telemetry:
+  enable: true   # set to false to disable all telemetry
+```
+
+### Database tables
+
+| Table                | Purpose                                           |
+| :------------------- | :------------------------------------------------ |
+| `telemetry_runs`     | One row per analysis/fixer/patch run              |
+| `telemetry_events`   | Granular events within a run (issues, LLM calls)  |
+
+Tables are auto-created by `PostgresDbSetup` during database initialization, or can be manually applied via `db/schema_telemetry.sql`.
+
+### Dashboard
+
+The **Telemetry** tab in the Streamlit UI displays: total runs, issues found/fixed, fix success rate, runs over time, issues by severity, top issue types, LLM usage by model, and a drill-down into individual run events.
+
+---
+
+## Human-in-the-Loop (HITL) Feedback Store
+
+The HITL pipeline uses **PostgreSQL** (shared `codebase_analytics_db`) for persistent storage of human feedback decisions and constraint rules. This enables agents to learn from accumulated human review history across runs.
+
+### Database tables
+
+| Table                       | Purpose                                     |
+| :-------------------------- | :------------------------------------------ |
+| `hitl_feedback_decisions`   | Human review outcomes (SKIP, FIX, etc.)     |
+| `hitl_constraint_rules`     | Parsed constraint rules from markdown files |
+| `hitl_run_metadata`         | Audit trail of analysis runs                |
+
+### Enabling HITL
+
+HITL can be enabled via the CLI (`--enable-hitl`), `global_config.yaml` (`hitl.enable: true`), or the **Enable HITL** toggle in the Streamlit sidebar. When enabled, agents will check past feedback decisions and inject constraint-aware context into LLM prompts.
 
 ---
 
@@ -575,6 +634,14 @@ psql -h localhost -U codebase_analytics_user -d codebase_analytics_db
 ```sql
 -- Check embeddings
 SELECT document, cmetadata FROM langchain_pg_embedding LIMIT 5;
+
+-- Check telemetry runs
+SELECT run_id, mode, status, issues_total, issues_fixed, duration_seconds
+FROM telemetry_runs ORDER BY created_at DESC LIMIT 10;
+
+-- Check HITL feedback history
+SELECT issue_type, human_action, COUNT(*) FROM hitl_feedback_decisions
+GROUP BY issue_type, human_action ORDER BY count DESC;
 
 -- Clear all vector data
 DELETE FROM langchain_pg_embedding;

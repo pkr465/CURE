@@ -177,11 +177,130 @@ class PostgresDbSetup:
                 sql.Identifier(self.collection_table)
             ))
 
-            # Optional: Add indexes for faster queries (uncomment if needed)
-            # cur.execute(sql.SQL("CREATE INDEX IF NOT EXISTS idx_embedding_vector ON {} USING ivfflat (embedding);").format(sql.Identifier(self.embedding_table)))
-            # cur.execute(sql.SQL("CREATE INDEX IF NOT EXISTS idx_collection_id ON {} (collection_id);").format(sql.Identifier(self.embedding_table)))
             dbconn.commit()
             logger.info("Vector schema/tables ready.")
+
+        # Create telemetry & HITL tables
+        self._setup_telemetry_and_hitl_tables(dbconn)
+
+    def _setup_telemetry_and_hitl_tables(
+        self, dbconn: psycopg2.extensions.connection
+    ) -> None:
+        """Create telemetry and HITL tables if they don't exist."""
+        with dbconn.cursor() as cur:
+            # ── Telemetry runs ────────────────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS telemetry_runs (
+                    run_id              TEXT        PRIMARY KEY,
+                    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    finished_at         TIMESTAMPTZ,
+                    mode                TEXT        NOT NULL,
+                    status              TEXT        NOT NULL DEFAULT 'started',
+                    codebase_path       TEXT,
+                    files_analyzed      INTEGER     DEFAULT 0,
+                    total_chunks        INTEGER     DEFAULT 0,
+                    issues_total        INTEGER     DEFAULT 0,
+                    issues_critical     INTEGER     DEFAULT 0,
+                    issues_high         INTEGER     DEFAULT 0,
+                    issues_medium       INTEGER     DEFAULT 0,
+                    issues_low          INTEGER     DEFAULT 0,
+                    issues_fixed        INTEGER     DEFAULT 0,
+                    issues_skipped      INTEGER     DEFAULT 0,
+                    issues_failed       INTEGER     DEFAULT 0,
+                    llm_provider        TEXT,
+                    llm_model           TEXT,
+                    total_llm_calls     INTEGER     DEFAULT 0,
+                    total_prompt_tokens  INTEGER    DEFAULT 0,
+                    total_completion_tokens INTEGER DEFAULT 0,
+                    total_llm_latency_ms INTEGER   DEFAULT 0,
+                    use_ccls            BOOLEAN     DEFAULT FALSE,
+                    use_hitl            BOOLEAN     DEFAULT FALSE,
+                    constraints_used    TEXT,
+                    duration_seconds    REAL,
+                    metadata            JSONB
+                )
+            """)
+
+            # ── Telemetry events ──────────────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS telemetry_events (
+                    event_id            BIGSERIAL   PRIMARY KEY,
+                    run_id              TEXT        NOT NULL
+                                         REFERENCES telemetry_runs(run_id)
+                                         ON DELETE CASCADE,
+                    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    event_type          TEXT        NOT NULL,
+                    file_path           TEXT,
+                    line_number         INTEGER,
+                    issue_type          TEXT,
+                    severity            TEXT,
+                    llm_provider        TEXT,
+                    llm_model           TEXT,
+                    prompt_tokens       INTEGER,
+                    completion_tokens   INTEGER,
+                    latency_ms          INTEGER,
+                    detail              JSONB
+                )
+            """)
+
+            # ── HITL feedback decisions ───────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS hitl_feedback_decisions (
+                    id                  TEXT        PRIMARY KEY,
+                    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    source              TEXT        NOT NULL,
+                    file_path           TEXT        NOT NULL,
+                    line_number         INTEGER,
+                    code_snippet        TEXT,
+                    issue_type          TEXT,
+                    severity            TEXT,
+                    human_action        TEXT        NOT NULL,
+                    human_feedback_text TEXT,
+                    applied_constraints JSONB,
+                    remediation_notes   TEXT,
+                    agent_that_flagged  TEXT,
+                    run_id              TEXT
+                )
+            """)
+
+            # ── HITL constraint rules ─────────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS hitl_constraint_rules (
+                    rule_id               TEXT  PRIMARY KEY,
+                    description           TEXT,
+                    standard_remediation  TEXT,
+                    llm_action            TEXT,
+                    reasoning             TEXT,
+                    example_allowed       TEXT,
+                    example_prohibited    TEXT,
+                    applies_to_patterns   JSONB,
+                    source_file           TEXT
+                )
+            """)
+
+            # ── HITL run metadata ─────────────────────────────────────────
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS hitl_run_metadata (
+                    run_id           TEXT        PRIMARY KEY,
+                    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    config_snapshot  JSONB
+                )
+            """)
+
+            # ── Indexes ───────────────────────────────────────────────────
+            for idx_sql in [
+                "CREATE INDEX IF NOT EXISTS idx_telemetry_runs_mode ON telemetry_runs(mode)",
+                "CREATE INDEX IF NOT EXISTS idx_telemetry_runs_created ON telemetry_runs(created_at)",
+                "CREATE INDEX IF NOT EXISTS idx_telemetry_events_run ON telemetry_events(run_id)",
+                "CREATE INDEX IF NOT EXISTS idx_telemetry_events_type ON telemetry_events(event_type)",
+                "CREATE INDEX IF NOT EXISTS idx_hitl_fd_issue_type ON hitl_feedback_decisions(issue_type)",
+                "CREATE INDEX IF NOT EXISTS idx_hitl_fd_file_path ON hitl_feedback_decisions(file_path)",
+                "CREATE INDEX IF NOT EXISTS idx_hitl_fd_human_action ON hitl_feedback_decisions(human_action)",
+            ]:
+                cur.execute(idx_sql)
+
+            dbconn.commit()
+            logger.info("Telemetry & HITL tables ready.")
 
     def run(self) -> None:
         """

@@ -1,7 +1,7 @@
 # Linux Kernel & Hardware Driver Constraints
 
-## 1. Issue Identification Rules (WHAT TO IGNORE)
-*Use these rules to filter out False Positives during analysis.*
+## 1. Issue Identification Rules
+*Use these rules to filter out false positives during analysis.*
 
 ### A. Pointer Validity (Hardware Contexts)
 *   **Context**: Variables `soc`, `vdev`, `pdev`, `hif`, `hdd_context`, `cdp_soc` are core driver structures.
@@ -21,7 +21,7 @@
 
 ---
 
-## 2. Issue Resolution Rules (HOW TO FIX)
+## 2. Issue Resolution Rules
 *Use these rules when generating code fixes.*
 
 ### A. Performance & Flow (Critical Constraints)

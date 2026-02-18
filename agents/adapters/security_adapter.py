@@ -1,14 +1,95 @@
-"""Security vulnerability scanning using Flawfinder."""
+"""Security vulnerability scanning using Flawfinder (with regex fallback)."""
 
 import csv
 import logging
+import re
 import subprocess
 import tempfile
 import shutil
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agents.adapters.base_adapter import BaseStaticAdapter
+
+
+# ── Regex-based dangerous-function database ───────────────────────────────
+# Format: (pattern, level 0-5, CWE, category, warning message)
+_DANGEROUS_FUNCTIONS: List[Tuple[re.Pattern, int, str, str, str]] = [
+    # Buffer overflow — high risk
+    (re.compile(r'\bgets\s*\('), 5, "CWE-120", "buffer",
+     "gets() is extremely dangerous — no bounds checking. Use fgets() instead."),
+    (re.compile(r'\bstrcpy\s*\('), 4, "CWE-120", "buffer",
+     "strcpy() does not check buffer bounds. Use strncpy() or strlcpy()."),
+    (re.compile(r'\bstrcat\s*\('), 4, "CWE-120", "buffer",
+     "strcat() does not check buffer bounds. Use strncat() or strlcat()."),
+    (re.compile(r'\bsprintf\s*\('), 4, "CWE-120", "buffer",
+     "sprintf() does not check buffer bounds. Use snprintf()."),
+    (re.compile(r'\bvsprintf\s*\('), 4, "CWE-120", "buffer",
+     "vsprintf() does not check buffer bounds. Use vsnprintf()."),
+    (re.compile(r'\bwcscpy\s*\('), 4, "CWE-120", "buffer",
+     "wcscpy() does not check buffer bounds. Use wcsncpy()."),
+    (re.compile(r'\bwcscat\s*\('), 4, "CWE-120", "buffer",
+     "wcscat() does not check buffer bounds. Use wcsncat()."),
+
+    # Format string — high risk
+    (re.compile(r'\bprintf\s*\(\s*[a-zA-Z_]\w*\s*\)'), 4, "CWE-134", "format",
+     "printf() with variable format string — potential format string vulnerability."),
+    (re.compile(r'\bfprintf\s*\([^,]+,\s*[a-zA-Z_]\w*\s*\)'), 4, "CWE-134", "format",
+     "fprintf() with variable format string — potential format string vulnerability."),
+    (re.compile(r'\bsyslog\s*\([^,]+,\s*[a-zA-Z_]\w*\s*\)'), 4, "CWE-134", "format",
+     "syslog() with variable format string — potential format string vulnerability."),
+
+    # Memory functions — medium risk
+    (re.compile(r'\bmemcpy\s*\('), 2, "CWE-120", "buffer",
+     "memcpy() — ensure size parameter is correctly bounded."),
+    (re.compile(r'\bmemmove\s*\('), 2, "CWE-120", "buffer",
+     "memmove() — ensure size parameter is correctly bounded."),
+
+    # Dangerous input/output
+    (re.compile(r'\bscanf\s*\('), 4, "CWE-120", "input",
+     "scanf() can overflow buffers. Use width specifiers or fgets()+sscanf()."),
+    (re.compile(r'\bfscanf\s*\('), 3, "CWE-120", "input",
+     "fscanf() can overflow buffers. Use width specifiers."),
+    (re.compile(r'\bsscanf\s*\('), 3, "CWE-120", "input",
+     "sscanf() can overflow buffers. Use width specifiers."),
+
+    # Temporary files — medium risk
+    (re.compile(r'\bmktemp\s*\('), 4, "CWE-377", "tmpfile",
+     "mktemp() is insecure (race condition). Use mkstemp()."),
+    (re.compile(r'\btmpnam\s*\('), 3, "CWE-377", "tmpfile",
+     "tmpnam() is insecure (race condition). Use mkstemp()."),
+    (re.compile(r'\btempnam\s*\('), 3, "CWE-377", "tmpfile",
+     "tempnam() is insecure (race condition). Use mkstemp()."),
+
+    # Race conditions
+    (re.compile(r'\baccess\s*\('), 4, "CWE-362", "race",
+     "access() has TOCTOU race condition. Use faccessat() or open()+fstat()."),
+
+    # Random number generator
+    (re.compile(r'\brand\s*\('), 3, "CWE-338", "random",
+     "rand() is not cryptographically secure. Use arc4random() or /dev/urandom."),
+    (re.compile(r'\bsrand\s*\('), 2, "CWE-338", "random",
+     "srand() seeds a weak PRNG. Use a cryptographic RNG for security purposes."),
+
+    # Exec/system — medium risk
+    (re.compile(r'\bsystem\s*\('), 4, "CWE-78", "shell",
+     "system() — potential command injection. Validate/sanitize input."),
+    (re.compile(r'\bpopen\s*\('), 4, "CWE-78", "shell",
+     "popen() — potential command injection. Validate/sanitize input."),
+    (re.compile(r'\bexecl\s*\('), 3, "CWE-78", "shell",
+     "exec family — ensure arguments are not user-controlled."),
+    (re.compile(r'\bexeclp\s*\('), 3, "CWE-78", "shell",
+     "exec family — ensure arguments are not user-controlled."),
+    (re.compile(r'\bexecvp\s*\('), 3, "CWE-78", "shell",
+     "exec family — ensure arguments are not user-controlled."),
+
+    # Integer overflow
+    (re.compile(r'\batoi\s*\('), 2, "CWE-190", "integer",
+     "atoi() does not detect overflow. Use strtol() with error checking."),
+    (re.compile(r'\batol\s*\('), 2, "CWE-190", "integer",
+     "atol() does not detect overflow. Use strtol() with error checking."),
+]
+
 
 class SecurityAdapter(BaseStaticAdapter):
     """
@@ -16,6 +97,8 @@ class SecurityAdapter(BaseStaticAdapter):
 
     Analyzes source code for common security issues, CWE violations,
     and dangerous function calls. Reports findings by severity and CWE.
+
+    Falls back to regex-based scanning when Flawfinder is not installed.
     """
 
     def __init__(self, debug: bool = False):
@@ -26,14 +109,15 @@ class SecurityAdapter(BaseStaticAdapter):
             debug: Enable debug logging if True.
         """
         super().__init__("security", debug=debug)
-        
+
         # Check for the CLI tool explicitly instead of checking for the python module
         self.flawfinder_path = shutil.which("flawfinder")
         self.flawfinder_available = self.flawfinder_path is not None
-        
+
         if not self.flawfinder_available:
             self.logger.warning(
-                "Flawfinder executable not found in PATH. Install with: pip install flawfinder"
+                "Flawfinder not found — using regex fallback. "
+                "For best results: pip install flawfinder"
             )
         else:
             self.logger.debug(f"Flawfinder found at: {self.flawfinder_path}")
@@ -55,11 +139,7 @@ class SecurityAdapter(BaseStaticAdapter):
         Returns:
             Standard analysis result dict with score, grade, metrics, issues, details.
         """
-        # Step 1: Check tool availability
-        if not self.flawfinder_available:
-            return self._handle_tool_unavailable(
-                "Flawfinder", "Install with: pip install flawfinder"
-            )
+        using_fallback = not self.flawfinder_available
 
         # Step 2: Filter to C/C++ files
         c_cpp_suffixes = (".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hxx")
@@ -72,68 +152,62 @@ class SecurityAdapter(BaseStaticAdapter):
         if not cpp_files:
             return self._empty_result("No C/C++ files to analyze")
 
-        # Step 3: Scan each file with flawfinder
+        # Step 3: Scan each file
         all_findings = []
         files_scanned = 0
 
         for entry in cpp_files:
             file_path = entry.get("file_relative_path", "unknown")
             source_code = entry.get("source", "")
-            
+
             if not source_code.strip():
                 continue
 
-            tmp_path = None
-            try:
-                # Write source to temporary file
-                with tempfile.NamedTemporaryFile(
-                    mode="w", suffix=".cpp", delete=False, encoding='utf-8'
-                ) as tmp:
-                    tmp.write(source_code)
-                    tmp_path = tmp.name
+            if self.flawfinder_available:
+                # ── Flawfinder path ──
+                tmp_path = None
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".cpp", delete=False, encoding='utf-8'
+                    ) as tmp:
+                        tmp.write(source_code)
+                        tmp_path = tmp.name
 
-                if self.debug:
-                    self.logger.debug(f"Running flawfinder on {file_path}...")
+                    cmd = [self.flawfinder_path, "--csv", "--columns", tmp_path]
+                    result = subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=30,
+                    )
 
-                # Run flawfinder on the temp file
-                # --csv: Output format
-                # --columns: Show headers (crucial for DictReader)
-                # --dataonly: Don't show headers (We DO want headers for DictReader, so don't use --dataonly if parsing via DictReader logic unless we handle it)
-                # Flawfinder default with --csv includes headers.
-                cmd = [self.flawfinder_path, "--csv", "--columns", tmp_path]
-                
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                )
+                    if result.returncode != 0 and not result.stdout:
+                        self.logger.error(f"Flawfinder failed on {file_path}: {result.stderr}")
+                        continue
 
-                if result.returncode != 0 and not result.stdout:
-                    self.logger.error(f"Flawfinder failed on {file_path}: {result.stderr}")
-                    continue
+                    findings = self._parse_flawfinder_csv(
+                        result.stdout, file_path, source_code
+                    )
+                    if findings:
+                        all_findings.extend(findings)
+                    files_scanned += 1
 
-                # Parse CSV output
-                findings = self._parse_flawfinder_csv(
-                    result.stdout, file_path, source_code
-                )
-                
-                if findings:
-                    all_findings.extend(findings)
-                
-                files_scanned += 1
-
-            except subprocess.TimeoutExpired:
-                self.logger.error(f"Flawfinder timeout on {file_path}")
-            except Exception as e:
-                self.logger.error(f"Error scanning {file_path}: {e}")
-            finally:
-                # Clean up temp file
-                if tmp_path and os.path.exists(tmp_path):
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
+                except subprocess.TimeoutExpired:
+                    self.logger.error(f"Flawfinder timeout on {file_path}")
+                except Exception as e:
+                    self.logger.error(f"Error scanning {file_path}: {e}")
+                finally:
+                    if tmp_path and os.path.exists(tmp_path):
+                        try:
+                            os.unlink(tmp_path)
+                        except OSError:
+                            pass
+            else:
+                # ── Regex fallback path ──
+                try:
+                    findings = self._regex_scan_file(file_path, source_code)
+                    if findings:
+                        all_findings.extend(findings)
+                    files_scanned += 1
+                except Exception as e:
+                    self.logger.error(f"Error regex-scanning {file_path}: {e}")
 
         # Step 4: Handle "No Issues Found" case explicitly (FIX for 0 Score)
         if not all_findings:
@@ -309,6 +383,32 @@ class SecurityAdapter(BaseStaticAdapter):
         except Exception as e:
             self.logger.error(f"Error parsing flawfinder CSV: {e}")
 
+        return findings
+
+    def _regex_scan_file(
+        self, file_path: str, source_code: str
+    ) -> List[Dict[str, Any]]:
+        """Scan a single file for dangerous functions using regex patterns."""
+        findings = []
+        lines = source_code.splitlines()
+        for line_idx, line in enumerate(lines, start=1):
+            # Skip comments (simple heuristic)
+            stripped = line.lstrip()
+            if stripped.startswith("//") or stripped.startswith("/*") or stripped.startswith("*"):
+                continue
+            for pattern, level, cwe, category, warning in _DANGEROUS_FUNCTIONS:
+                if pattern.search(line):
+                    findings.append({
+                        "file": file_path,
+                        "line": line_idx,
+                        "level": level,
+                        "warning": warning,
+                        "cwe": cwe,
+                        "category": category,
+                        "context": stripped[:120],
+                        "suggestion": "",
+                        "name": pattern.pattern.split(r'\b')[1] if r'\b' in pattern.pattern else "",
+                    })
         return findings
 
     @staticmethod

@@ -184,20 +184,21 @@ class CodebaseFixerAgent:
 
     def _load_constraints(self, file_name: str, section_keyword: str = "Issue Resolution Rules") -> str:
         """
-        Loads constraints from agents/constraints/common_constraints.md 
-        and agents/constraints/<filename>_constraints.md.
-        
+        Loads constraints from agents/constraints/common_constraints.md
+        and agents/constraints/<stem>_constraints.md (recursive search).
+
         Specifically extracts the section matching 'section_keyword' (default: 'Issue Resolution Rules')
         to ensure the Fixer Agent only receives rules about HOW to fix (not just identification).
-        
-        :param file_name: The name of the file being processed (e.g., dp_interrupts.c).
+
+        :param file_name: The name of the file being processed (e.g., dp_main.c).
         :param section_keyword: The header keyword to look for in the markdown files.
         :return: A combined string of constraints to inject into the prompt.
         """
         combined_constraints = []
-        
+        base_dir = Path(self.constraints_dir)
+
         # 1. Load Common Constraints
-        common_file = self.constraints_dir / "common_constraints.md"
+        common_file = base_dir / "common_constraints.md"
         if common_file.exists():
             try:
                 with open(common_file, 'r', encoding='utf-8') as f:
@@ -207,23 +208,34 @@ class CodebaseFixerAgent:
                         combined_constraints.append(f"--- GLOBAL RESOLUTION RULES ---\n{section_content}\n")
             except Exception as e:
                 self.logger.warning(f"Failed to read common constraints: {e}")
-        
-        # 2. Load File-Specific Constraints
-        # Convention: <filename>_constraints.md
-        specific_constraint_name = f"{file_name}_constraints.md"
-        specific_file = self.constraints_dir / specific_constraint_name
-        
-        if specific_file.exists():
+
+        # 2. Load File-Specific Constraints (Recursive Search)
+        # Strip extension: dp_main.c → dp_main, then search for dp_main_constraints.md
+        target_stem = Path(file_name).stem
+        search_filename = f"{target_stem}_constraints.md"
+
+        specific_file_path = None
+        try:
+            found_files = list(base_dir.rglob(search_filename))
+            if len(found_files) == 1:
+                specific_file_path = found_files[0]
+            elif len(found_files) > 1:
+                specific_file_path = found_files[0]
+                self.logger.warning(f"Multiple constraint files found for {search_filename}. Using: {specific_file_path}")
+        except Exception as e:
+            self.logger.error(f"Error while searching for specific constraints: {e}")
+
+        if specific_file_path and specific_file_path.exists():
             try:
-                with open(specific_file, 'r', encoding='utf-8') as f:
+                with open(specific_file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
                     section_content = self._extract_constraint_section(content, section_keyword)
                     if section_content:
                         combined_constraints.append(f"--- SPECIFIC FILE RESOLUTION RULES ({file_name}) ---\n{section_content}\n")
-                self.logger.info(f"    > Loaded specific resolution rules: {specific_constraint_name}")
+                self.logger.info(f"    > Loaded specific resolution rules: {specific_file_path}")
             except Exception as e:
                 self.logger.warning(f"Failed to read specific constraints for {file_name}: {e}")
-                
+
         if not combined_constraints:
             return ""
 

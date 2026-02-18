@@ -142,6 +142,203 @@ def dataframe_to_directives(
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  Save feedback back to detailed_code_review.xlsx
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def save_feedback_to_excel(
+    df: pd.DataFrame,
+    excel_path: str,
+) -> bool:
+    """
+    Write Action/Notes feedback from the Review UI back into the
+    existing detailed_code_review.xlsx file.
+
+    Maps:
+        Action  → "Feedback" column in the Excel
+        Notes   → "Constraints" column in the Excel
+
+    If the Excel file does not exist, creates a new one.
+
+    Returns True on success, False on failure.
+    """
+    try:
+        import openpyxl
+
+        if os.path.exists(excel_path):
+            wb = openpyxl.load_workbook(excel_path)
+        else:
+            # Create a fresh workbook with the Analysis sheet
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "Analysis"
+            headers = [
+                "S.No", "Title", "Severity", "Confidence", "Category",
+                "File", "Line", "Description", "Suggestion",
+                "Code", "Fixed_Code", "Feedback", "Constraints",
+            ]
+            for col_idx, h in enumerate(headers, 1):
+                ws.cell(row=1, column=col_idx, value=h)
+            # Populate rows from DataFrame
+            for row_idx, (_, row) in enumerate(df.iterrows(), start=2):
+                ws.cell(row=row_idx, column=1, value=row_idx - 1)
+                for col_idx, col_name in enumerate(headers[1:], 2):
+                    mapped = col_name
+                    if col_name == "Feedback":
+                        mapped = "Action"
+                    elif col_name == "Constraints":
+                        mapped = "Notes"
+                    val = row.get(mapped, "")
+                    if val is not None and not isinstance(val, (str, int, float, bool)):
+                        val = str(val)
+                    ws.cell(row=row_idx, column=col_idx, value=val)
+            wb.save(excel_path)
+            logger.info("Created new Excel with feedback: %s", excel_path)
+            return True
+
+        # --- Update existing workbook ---
+        ws = None
+        for name in wb.sheetnames:
+            if name.lower() in ("analysis", "sheet1"):
+                ws = wb[name]
+                break
+        if ws is None:
+            ws = wb.active
+
+        # Build header → column index map (1-based)
+        header_map = {}
+        for col_idx in range(1, ws.max_column + 1):
+            cell_val = ws.cell(row=1, column=col_idx).value
+            if cell_val:
+                header_map[str(cell_val).strip()] = col_idx
+
+        # Ensure Feedback and Constraints columns exist
+        next_col = ws.max_column + 1
+        if "Feedback" not in header_map:
+            ws.cell(row=1, column=next_col, value="Feedback")
+            header_map["Feedback"] = next_col
+            next_col += 1
+        if "Constraints" not in header_map:
+            ws.cell(row=1, column=next_col, value="Constraints")
+            header_map["Constraints"] = next_col
+
+        feedback_col = header_map["Feedback"]
+        constraints_col = header_map["Constraints"]
+
+        # Build a lookup from (File, Line, Title) → (Action, Notes)
+        feedback_lookup = {}
+        for _, row in df.iterrows():
+            key = (
+                str(row.get("File", "")).strip(),
+                str(row.get("Line", "")).strip(),
+                str(row.get("Title", "")).strip(),
+            )
+            feedback_lookup[key] = (
+                str(row.get("Action", "")).strip(),
+                str(row.get("Notes", "")).strip(),
+            )
+
+        # Find File, Line, Title columns in the Excel for matching
+        file_col = header_map.get("File")
+        line_col = header_map.get("Line")
+        title_col = header_map.get("Title")
+
+        updated = 0
+        for row_idx in range(2, ws.max_row + 1):
+            file_val = str(ws.cell(row=row_idx, column=file_col).value or "").strip() if file_col else ""
+            line_val = str(ws.cell(row=row_idx, column=line_col).value or "").strip() if line_col else ""
+            title_val = str(ws.cell(row=row_idx, column=title_col).value or "").strip() if title_col else ""
+
+            key = (file_val, line_val, title_val)
+            if key in feedback_lookup:
+                action, notes = feedback_lookup[key]
+                ws.cell(row=row_idx, column=feedback_col, value=action)
+                ws.cell(row=row_idx, column=constraints_col, value=notes)
+                updated += 1
+
+        wb.save(excel_path)
+        logger.info("Updated %d rows in %s with feedback", updated, excel_path)
+        return True
+
+    except Exception as e:
+        logger.error("Failed to save feedback to Excel: %s", e, exc_info=True)
+        return False
+
+
+def load_excel_as_dataframe(excel_path: str) -> Optional[pd.DataFrame]:
+    """
+    Load a detailed_code_review.xlsx (or customer-reported Excel) into a DataFrame
+    suitable for the Review/Fix tabs.
+
+    Handles column mapping:
+        Feedback    → Action
+        Constraints → Notes
+
+    Returns None if the file cannot be loaded.
+    """
+    try:
+        # Try to load the "Analysis" sheet first (primary issues sheet).
+        # Fall back to first sheet if "Analysis" doesn't exist (e.g. customer Excel).
+        try:
+            df = pd.read_excel(excel_path, sheet_name="Analysis", engine="openpyxl")
+        except ValueError:
+            df = pd.read_excel(excel_path, sheet_name=0, engine="openpyxl")
+
+        # Map Excel column names to UI column names
+        rename_map = {}
+        if "Feedback" in df.columns and "Action" not in df.columns:
+            rename_map["Feedback"] = "Action"
+        if "Constraints" in df.columns and "Notes" not in df.columns:
+            rename_map["Constraints"] = "Notes"
+        if rename_map:
+            df = df.rename(columns=rename_map)
+
+        # Drop S.No if present (UI doesn't use it)
+        if "S.No" in df.columns:
+            df = df.drop(columns=["S.No"])
+
+        # Ensure Action and Notes columns exist
+        if "Action" not in df.columns:
+            df["Action"] = "Auto-fix"
+        if "Notes" not in df.columns:
+            df["Notes"] = ""
+
+        # Fill NaN in Action with default
+        df["Action"] = df["Action"].fillna("Auto-fix").replace("", "Auto-fix")
+
+        return df
+
+    except Exception as e:
+        logger.error("Failed to load Excel %s: %s", excel_path, e)
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Load deep analysis adapter sheets from Excel
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def load_adapter_sheets(excel_path: str) -> Dict[str, pd.DataFrame]:
+    """
+    Load deep analysis adapter sheets (static_*) from detailed_code_review.xlsx.
+
+    Returns a dict mapping sheet display names to DataFrames.
+    Empty dict if no adapter sheets found or file cannot be loaded.
+    """
+    result: Dict[str, pd.DataFrame] = {}
+    try:
+        xls = pd.ExcelFile(excel_path, engine="openpyxl")
+        for sheet_name in xls.sheet_names:
+            if sheet_name.startswith("static_"):
+                df = pd.read_excel(xls, sheet_name=sheet_name)
+                if not df.empty:
+                    # Convert sheet name to display name: static_lizard → Lizard
+                    display_name = sheet_name.replace("static_", "").replace("_", " ").title()
+                    result[display_name] = df
+    except Exception as e:
+        logger.warning("Could not load adapter sheets from %s: %s", excel_path, e)
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  DataFrame → Excel bytes (for download)
 # ═══════════════════════════════════════════════════════════════════════════════
 

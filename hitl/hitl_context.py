@@ -68,9 +68,9 @@ class HITLContext:
         self.config = config or HITLConfig()
         self.llm_tools = llm_tools
 
-        # Initialise persistent store
+        # Initialise persistent store (PostgreSQL)
         self.store = FeedbackStore(
-            db_path=str(self.config.store_db_path),
+            connection_string=self.config.postgres_connection,
             config=self.config,
         )
 

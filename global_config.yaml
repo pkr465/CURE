@@ -57,23 +57,23 @@ paths:
 llm:
   # ── Provider toggle ────────────────────────────────────────────────────
   # Switch between "qgenie" and "anthropic" to swap the LLM backend.
-  #llm_provider: "anthropic"
-  llm_provider: "qgenie" # "qgenie" | "anthropic"
+  llm_provider: "anthropic"
+  #llm_provider: "qgenie" # "qgenie" | "anthropic"
 
   # ── Primary analysis model ─────────────────────────────────────────────
 
   # Change this single line to switch the entire engine between providers.
-  model: "azure::gpt-5.2"
-  #model: "anthropic::claude-sonnet-4-20250514"
+  #model: "azure::gpt-5.2"
+  model: "anthropic::claude-sonnet-4-20250514"
 
   # ── Coding / refactoring model (may differ from primary) ───────────────
-  #coding_model: "anthropic::claude-sonnet-4-20250514"
+  coding_model: "anthropic::claude-sonnet-4-20250514"
   #coding_model: "vertexai::gemini-3-pro-preview"
   #coding_model: "anthropic::claude-4-sonnet"
-  coding_model: "azure::gpt-5.2"
+  #coding_model: "azure::gpt-5.2"
   # ── Streamlit / UI model ───────────────────────────────────────────────
-  streamlit_model: "azure::gpt-5.2"
-  #streamlit_model: "anthropic::claude-sonnet-4-20250514"
+  #streamlit_model: "azure::gpt-5.2"
+  streamlit_model: "anthropic::claude-sonnet-4-20250514"
 
   # ── API keys — prefer ${ENV_VAR} overrides for secrets ─────────────────
   anthropic_api_key: ${ANTHROPIC_API_KEY}
@@ -245,6 +245,8 @@ dependency_builder:
 # ────────────────────────────────────────────────────────────────────────────
 hitl:
   enable: false
+  # PostgreSQL connection (uses database.connection by default)
+  # store_db_path is deprecated — HITL now uses PostgreSQL
   store_db_path: "${OUT_DIR}/hitl/feedback.db"
   rag_top_k: 5
   rag_similarity_threshold: 0.6
@@ -255,3 +257,11 @@ hitl:
   enable_prompt_augmentation: true
   rag_context_max_tokens: 2000
   auto_persist_feedback: true
+
+# ────────────────────────────────────────────────────────────────────────────
+# Telemetry — Silent usage tracking for framework analytics
+# Uses the same PostgreSQL database (codebase_analytics_db).
+# ────────────────────────────────────────────────────────────────────────────
+telemetry:
+  enable: true
+  # Uses database.connection by default — no separate config needed

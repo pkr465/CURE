@@ -12,7 +12,7 @@ three CURE agents:
 Architecture
 ~~~~~~~~~~~~
 
-1. ``FeedbackStore`` — SQLite persistence for decisions and constraints
+1. ``FeedbackStore`` — PostgreSQL persistence for decisions and constraints
 2. ``ExcelFeedbackParser`` — reads ``detailed_code_review.xlsx``
 3. ``ConstraintParser`` — reads ``*_constraints.md`` files
 4. ``RAGRetriever`` — queries similar past decisions

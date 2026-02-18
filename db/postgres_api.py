@@ -33,7 +33,7 @@ class PostgresVectorStore:
         connection_string: str,
         collection_name: str,
         embedding_table: str,
-        collection_embedding_table: str,
+        collection_table: str,
         api_key: str,
     ) -> None:
         self.logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ class PostgresVectorStore:
         self.collection_name = collection_name
         self.api_key = api_key
         self.embedding_table = embedding_table
-        self.collection_embedding_table = collection_embedding_table
+        self.collection_table = collection_table
         self.vectorstore: Optional[PGVector] = None
         self.engine = create_engine(connection_string)
         self.embeddings_fn = QGenieEmbeddings(api_key=api_key)
@@ -150,12 +150,12 @@ class PostgresVectorStore:
 
             # Determine collection table and existence
             with self.engine.connect() as conn:
-                sql = text(f'SELECT COUNT(*) FROM "{self.collection_embedding_table}" WHERE name = :name')
+                sql = text(f'SELECT COUNT(*) FROM "{self.collection_table}" WHERE name = :name')
                 result = conn.execute(sql, {"name": self.collection_name})
                 collection_exists = result.scalar() > 0
 
             # Print which collection, which table names we're requesting
-            self.logger.debug(f"Embedding Table Config: embedding_table='{self.embedding_table}', collection_embedding_table='{self.collection_embedding_table}'")
+            self.logger.debug(f"Embedding Table Config: embedding_table='{self.embedding_table}', collection_table='{self.collection_table}'")
             self.logger.debug(f"Targeting collection: '{self.collection_name}' (collection_exists={collection_exists})")
 
             # Insert docs

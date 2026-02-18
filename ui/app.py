@@ -17,6 +17,7 @@ import time
 import threading
 from pathlib import Path
 from queue import Queue, Empty
+from typing import Dict, Optional
 
 import streamlit as st
 import pandas as pd
@@ -36,8 +37,10 @@ try:
     from ui.background_workers import (
         run_analysis_background,
         run_fixer_background,
+        run_patch_analysis_background,
         ANALYSIS_PHASES,
         FIXER_PHASES,
+        PATCH_PHASES,
     )
     WORKERS_AVAILABLE = True
 except ImportError:
@@ -51,6 +54,9 @@ try:
         export_to_excel_bytes,
         build_qa_traceability_report,
         compute_summary_stats,
+        save_feedback_to_excel,
+        load_excel_as_dataframe,
+        load_adapter_sheets,
     )
     FEEDBACK_HELPERS_AVAILABLE = True
 except ImportError:
@@ -115,6 +121,7 @@ _DEFAULTS = {
     "batch_size": 25,
     "use_llm": True,
     "enable_adapters": False,
+    "use_ccls": False,
     "exclude_dirs": "",
     # Pipeline state
     "analysis_in_progress": False,
@@ -128,6 +135,10 @@ _DEFAULTS = {
     "result_store": {},
     # Review & feedback
     "feedback_df": None,
+    # Patch analysis
+    "patch_original_file": "",
+    "patch_diff_file": "",
+    "patch_modified_file": "",
     # Fixer state
     "fixer_in_progress": False,
     "fixer_complete": False,
@@ -139,6 +150,13 @@ _DEFAULTS = {
     "directives_path": None,
     # QA
     "qa_results": [],
+    # Fixer audit feedback
+    "_audit_feedback_saved": None,
+    # Constraints generator
+    "constraints_generated_md": "",
+    # Configuration toggles
+    "enable_hitl": False,
+    "enable_telemetry": True,
 }
 for key, default in _DEFAULTS.items():
     if key not in st.session_state:
@@ -185,7 +203,7 @@ def _render_markdown_with_tables(md_text: str):
         try:
             df = pd.read_csv(io.StringIO(match.group(0)), sep="|", engine="python")
             df = df.loc[:, ~df.columns.str.contains("^Unnamed")]
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
         except Exception:
             pass
 
@@ -252,10 +270,12 @@ def page_analyze():
     st.markdown("### Input")
     input_mode = st.radio(
         "Input Source",
-        ["Local Folder", "Upload Files"],
+        ["Local Folder", "Upload Files", "Patch Analysis"],
         horizontal=True,
         label_visibility="collapsed",
     )
+
+    is_patch_mode = input_mode == "Patch Analysis"
 
     if input_mode == "Local Folder":
         codebase_path = st_tools.folder_browser(
@@ -274,7 +294,8 @@ def page_analyze():
                 st.success(f"✅ {msg}")
             else:
                 st.error(f"❌ {msg}")
-    else:
+
+    elif input_mode == "Upload Files":
         uploaded = st.file_uploader(
             "Upload C/C++ files",
             accept_multiple_files=True,
@@ -290,58 +311,143 @@ def page_analyze():
             st.session_state["codebase_path"] = upload_dir
             st.success(f"✅ {len(uploaded)} files uploaded to staging area.")
 
+    else:
+        # ── Patch Analysis inputs ─────────────────────────────────────
+        st.markdown(
+            "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+            "<span style='font-size:20px;'>🩹</span>"
+            "<span style='font-size:16px; font-weight:600;'>"
+            "Analyze a patch/diff for newly introduced issues"
+            "</span></div>",
+            unsafe_allow_html=True,
+        )
+
+        # Original file
+        patch_original = st_tools.folder_browser(
+            label="Original Source File",
+            default_path=st.session_state.get("codebase_path", ""),
+            key="patch_original_browser",
+            show_files=True,
+            file_extensions=[".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"],
+            help_text="Path to the original (unpatched) source file.",
+        )
+        st.session_state["patch_original_file"] = patch_original
+
+        if patch_original and os.path.isfile(patch_original):
+            st.success(f"✅ Original: `{os.path.basename(patch_original)}`")
+
+        # Patch / diff file
+        patch_file_path = st_tools.folder_browser(
+            label="Patch / Diff File",
+            default_path=st.session_state.get("output_dir", ""),
+            key="patch_diff_browser",
+            show_files=True,
+            file_extensions=[".patch", ".diff", ".txt"],
+            help_text="Path to the .patch or .diff file (unified diff format).",
+        )
+        st.session_state["patch_diff_file"] = patch_file_path
+
+        if patch_file_path and os.path.isfile(patch_file_path):
+            st.success(f"✅ Patch: `{os.path.basename(patch_file_path)}`")
+
+        # Modified file (optional) — if provided WITHOUT a patch file, diff is auto-generated
+        st.caption(
+            "**Optional**: Provide the modified file instead of (or in addition to) a patch file. "
+            "If only the modified file is given, a diff will be generated automatically."
+        )
+        patch_modified = st_tools.folder_browser(
+            label="Modified File (optional)",
+            default_path="",
+            key="patch_modified_browser",
+            show_files=True,
+            file_extensions=[".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"],
+            help_text="Path to the modified source file. If no patch file is provided, a diff will be generated.",
+        )
+        st.session_state["patch_modified_file"] = patch_modified
+
+        if patch_modified and os.path.isfile(patch_modified):
+            st.info(f"Modified: `{os.path.basename(patch_modified)}`")
+
+        # Upload fallback for patch file
+        if not (patch_file_path and os.path.isfile(patch_file_path)):
+            uploaded_patch = st.file_uploader(
+                "Or upload a patch/diff file",
+                type=["patch", "diff", "txt"],
+                key="patch_upload",
+            )
+            if uploaded_patch:
+                out_dir = st.session_state.get("output_dir", "./out")
+                os.makedirs(out_dir, exist_ok=True)
+                saved_path = os.path.join(out_dir, uploaded_patch.name)
+                with open(saved_path, "wb") as f:
+                    f.write(uploaded_patch.getbuffer())
+                st.session_state["patch_diff_file"] = saved_path
+                patch_file_path = saved_path
+                st.success(f"✅ Patch uploaded: `{uploaded_patch.name}`")
+
     st.divider()
 
     # ── Analysis configuration ────────────────────────────────────────────
-    st.markdown("### Configuration")
+    if not is_patch_mode:
+        st.markdown("### Configuration")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        analysis_mode = st.selectbox(
-            "Analysis Mode",
-            ["LLM Code Review", "Static Analysis Only"],
-            help=(
-                "**LLM Code Review**: Per-file semantic analysis using an LLM (produces Excel report).\n\n"
-                "**Static Analysis Only**: Fast regex-based 7-phase pipeline (produces health report JSON)."
-            ),
-        )
-        st.session_state["analysis_mode"] = analysis_mode
+        col1, col2 = st.columns(2)
+        with col1:
+            analysis_mode = st.selectbox(
+                "Analysis Mode",
+                ["LLM Code Review", "Static Analysis Only"],
+                help=(
+                    "**LLM Code Review**: Per-file semantic analysis using an LLM (produces Excel report).\n\n"
+                    "**Static Analysis Only**: Fast regex-based 7-phase pipeline (produces health report JSON)."
+                ),
+            )
+            st.session_state["analysis_mode"] = analysis_mode
 
-        dep_granularity = st.selectbox(
-            "Dependency Granularity",
-            ["File", "Module", "Package"],
-            help=(
-                "**File**: Individual source/header files.\n\n"
-                "**Module**: Group by directory (component-level).\n\n"
-                "**Package**: Top-level architecture layers."
-            ),
-        )
-        st.session_state["dependency_granularity"] = dep_granularity
+        with col2:
+            max_files = st.number_input("Max Files", min_value=1, max_value=50000, value=2000)
+            st.session_state["max_files"] = max_files
 
-    with col2:
-        max_files = st.number_input("Max Files", min_value=1, max_value=50000, value=2000)
-        st.session_state["max_files"] = max_files
+            batch_size = st.number_input("Batch Size", min_value=1, max_value=200, value=25)
+            st.session_state["batch_size"] = batch_size
 
-        batch_size = st.number_input("Batch Size", min_value=1, max_value=200, value=25)
-        st.session_state["batch_size"] = batch_size
-
-    # Advanced options
+    # Advanced options (shared by all modes)
     with st.expander("Advanced Options"):
         col1, col2 = st.columns(2)
         with col1:
             enable_adapters = st.checkbox(
-                "Enable Deep Adapters (Lizard, Flawfinder, CCLS)",
+                "Enable Deep Adapters (Lizard, Flawfinder)",
                 value=False,
             )
             st.session_state["enable_adapters"] = enable_adapters
 
+            if not is_patch_mode:
+                use_ccls = st.checkbox(
+                    "Use CCLS (semantic dependency analysis)",
+                    value=False,
+                    help="Requires ccls installed. Provides accurate call-graph and dependency context for LLM analysis.",
+                )
+                st.session_state["use_ccls"] = use_ccls
+
+                if use_ccls:
+                    dep_granularity = st.selectbox(
+                        "Dependency Granularity",
+                        ["File", "Module", "Package"],
+                        help=(
+                            "**File**: Individual source/header files.\n\n"
+                            "**Module**: Group by directory (component-level).\n\n"
+                            "**Package**: Top-level architecture layers."
+                        ),
+                    )
+                    st.session_state["dependency_granularity"] = dep_granularity
+
         with col2:
-            exclude_dirs = st.text_input(
-                "Exclude Directories (comma-separated)",
-                value="",
-                help="e.g., test,third_party,build",
-            )
-            st.session_state["exclude_dirs"] = exclude_dirs
+            if not is_patch_mode:
+                exclude_dirs = st.text_input(
+                    "Exclude Directories (comma-separated)",
+                    value="",
+                    help="e.g., test,third_party,build",
+                )
+                st.session_state["exclude_dirs"] = exclude_dirs
 
         output_dir = st_tools.folder_browser(
             label="Output Directory",
@@ -355,57 +461,113 @@ def page_analyze():
     st.divider()
 
     # ── Start analysis ────────────────────────────────────────────────────
-    can_start = bool(st.session_state.get("codebase_path"))
-    if can_start:
-        valid, _ = _validate_codebase_path(st.session_state["codebase_path"])
-        can_start = valid
-
-    if st.button("🚀 Start Analysis", type="primary", disabled=not can_start):
-        if not WORKERS_AVAILABLE:
-            st.error("Background workers module not available. Check ui/background_workers.py.")
-            return
-
-        # Prepare config
-        exclude = [
-            d.strip()
-            for d in st.session_state.get("exclude_dirs", "").split(",")
-            if d.strip()
-        ]
-        config = {
-            "codebase_path": st.session_state["codebase_path"],
-            "output_dir": st.session_state["output_dir"],
-            "analysis_mode": (
-                "llm_exclusive"
-                if st.session_state["analysis_mode"] == "LLM Code Review"
-                else "static"
-            ),
-            "dependency_granularity": st.session_state["dependency_granularity"],
-            "use_llm": st.session_state["analysis_mode"] == "LLM Code Review",
-            "enable_adapters": st.session_state.get("enable_adapters", False),
-            "max_files": st.session_state.get("max_files", 2000),
-            "batch_size": st.session_state.get("batch_size", 25),
-            "exclude_dirs": exclude,
-        }
-
-        # Initialize queue and result store
-        log_queue = Queue()
-        result_store = {"status": "running", "phase_statuses": {}}
-
-        st.session_state["log_queue"] = log_queue
-        st.session_state["result_store"] = result_store
-        st.session_state["pipeline_logs"] = []
-        st.session_state["phase_statuses"] = {i: "pending" for i in range(1, 8)}
-
-        # Launch background thread
-        t = threading.Thread(
-            target=run_analysis_background,
-            args=(config, log_queue, result_store),
-            daemon=True,
+    if is_patch_mode:
+        # Patch mode validation
+        has_original = bool(
+            st.session_state.get("patch_original_file")
+            and os.path.isfile(str(st.session_state.get("patch_original_file", "")))
         )
-        t.start()
-        st.session_state["analysis_thread"] = t
-        st.session_state["analysis_in_progress"] = True
-        st.rerun()
+        has_patch = bool(
+            st.session_state.get("patch_diff_file")
+            and os.path.isfile(str(st.session_state.get("patch_diff_file", "")))
+        )
+        has_modified = bool(
+            st.session_state.get("patch_modified_file")
+            and os.path.isfile(str(st.session_state.get("patch_modified_file", "")))
+        )
+        can_start = has_original and (has_patch or has_modified)
+
+        if not has_original:
+            st.warning("Select the original source file.")
+        elif not has_patch and not has_modified:
+            st.warning("Provide either a patch/diff file or a modified file.")
+
+        if st.button("🩹 Analyze Patch", type="primary", disabled=not can_start):
+            if not WORKERS_AVAILABLE:
+                st.error("Background workers module not available.")
+                return
+
+            config = {
+                "file_path": st.session_state["patch_original_file"],
+                "patch_file": st.session_state.get("patch_diff_file", ""),
+                "modified_file": st.session_state.get("patch_modified_file", ""),
+                "output_dir": st.session_state["output_dir"],
+                "enable_adapters": st.session_state.get("enable_adapters", False),
+            }
+
+            log_queue = Queue()
+            result_store = {"status": "running", "phase_statuses": {}}
+
+            st.session_state["log_queue"] = log_queue
+            st.session_state["result_store"] = result_store
+            st.session_state["pipeline_logs"] = []
+            st.session_state["phase_statuses"] = {i: "pending" for i in range(1, 8)}
+            st.session_state["analysis_mode"] = "Patch Analysis"
+
+            t = threading.Thread(
+                target=run_patch_analysis_background,
+                args=(config, log_queue, result_store),
+                daemon=True,
+            )
+            t.start()
+            st.session_state["analysis_thread"] = t
+            st.session_state["analysis_in_progress"] = True
+            st.rerun()
+    else:
+        # Standard analysis validation
+        can_start = bool(st.session_state.get("codebase_path"))
+        if can_start:
+            valid, _ = _validate_codebase_path(st.session_state["codebase_path"])
+            can_start = valid
+
+        if st.button("🚀 Start Analysis", type="primary", disabled=not can_start):
+            if not WORKERS_AVAILABLE:
+                st.error("Background workers module not available. Check ui/background_workers.py.")
+                return
+
+            # Prepare config
+            exclude = [
+                d.strip()
+                for d in st.session_state.get("exclude_dirs", "").split(",")
+                if d.strip()
+            ]
+            config = {
+                "codebase_path": st.session_state["codebase_path"],
+                "output_dir": st.session_state["output_dir"],
+                "analysis_mode": (
+                    "llm_exclusive"
+                    if st.session_state["analysis_mode"] == "LLM Code Review"
+                    else "static"
+                ),
+                "dependency_granularity": st.session_state["dependency_granularity"],
+                "use_llm": st.session_state["analysis_mode"] == "LLM Code Review",
+                "enable_adapters": st.session_state.get("enable_adapters", False),
+                "use_ccls": st.session_state.get("use_ccls", False),
+                "enable_hitl": st.session_state.get("enable_hitl", False),
+                "max_files": st.session_state.get("max_files", 2000),
+                "batch_size": st.session_state.get("batch_size", 25),
+                "exclude_dirs": exclude,
+            }
+
+            # Initialize queue and result store
+            log_queue = Queue()
+            result_store = {"status": "running", "phase_statuses": {}}
+
+            st.session_state["log_queue"] = log_queue
+            st.session_state["result_store"] = result_store
+            st.session_state["pipeline_logs"] = []
+            st.session_state["phase_statuses"] = {i: "pending" for i in range(1, 8)}
+
+            # Launch background thread
+            t = threading.Thread(
+                target=run_analysis_background,
+                args=(config, log_queue, result_store),
+                daemon=True,
+            )
+            t.start()
+            st.session_state["analysis_thread"] = t
+            st.session_state["analysis_in_progress"] = True
+            st.rerun()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -427,8 +589,12 @@ def page_pipeline():
         st.info("No analysis running. Go to **Analyze** to start one.")
         return
 
-    # Phase tracker
-    phases = ANALYSIS_PHASES if WORKERS_AVAILABLE else {i: f"Phase {i}" for i in range(1, 8)}
+    # Phase tracker — pick the right set of phase labels
+    is_patch = st.session_state.get("analysis_mode") == "Patch Analysis"
+    if WORKERS_AVAILABLE:
+        phases = PATCH_PHASES if is_patch else ANALYSIS_PHASES
+    else:
+        phases = {i: f"Phase {i}" for i in range(1, 8)}
     phase_statuses = st.session_state.get("phase_statuses", {})
 
     # Update from result_store (thread-safe read)
@@ -452,6 +618,8 @@ def page_pipeline():
             if result_store.get("status") == "success":
                 st.session_state["analysis_results"] = result_store.get("analysis_results", [])
                 st.session_state["analysis_metrics"] = result_store.get("analysis_metrics", {})
+                # Invalidate cached feedback DataFrame so Review tab rebuilds it
+                st.session_state["feedback_df"] = None
             st.rerun()
 
     # Log stream
@@ -514,22 +682,46 @@ def page_review():
         unsafe_allow_html=True,
     )
 
+    if not FEEDBACK_HELPERS_AVAILABLE:
+        st.error("Feedback helpers module not available.")
+        return
+
     results = st.session_state.get("analysis_results", [])
-    if not results:
+    out_dir = st.session_state.get("output_dir", "./out")
+    review_excel = os.path.join(out_dir, "detailed_code_review.xlsx")
+
+    # Build DataFrame if not cached — prefer Excel (authoritative), fall back to in-memory results
+    if st.session_state.get("feedback_df") is None:
+        if os.path.isfile(review_excel):
+            st.session_state["feedback_df"] = load_excel_as_dataframe(review_excel)
+        if st.session_state.get("feedback_df") is None and results:
+            st.session_state["feedback_df"] = results_to_dataframe(results)
+
+    # Reload button
+    reload_col, info_col = st.columns([1, 4])
+    with reload_col:
+        if st.button("🔄 Reload from Excel", key="review_reload"):
+            if os.path.isfile(review_excel):
+                st.session_state["feedback_df"] = load_excel_as_dataframe(review_excel)
+                st.rerun()
+            else:
+                st.warning("No `detailed_code_review.xlsx` found.")
+    with info_col:
+        if st.session_state.get("feedback_df") is not None:
+            src = "Excel" if os.path.isfile(review_excel) else "in-memory results"
+            st.caption(f"Loaded from {src} — {len(st.session_state['feedback_df'])} issues")
+
+    df = st.session_state.get("feedback_df")
+    if df is None or df.empty:
         st.info(
             "No analysis results available. Run an analysis from the **Analyze** tab first."
         )
         return
 
-    if not FEEDBACK_HELPERS_AVAILABLE:
-        st.error("Feedback helpers module not available.")
-        return
-
-    # Build DataFrame if not cached
-    if st.session_state.get("feedback_df") is None:
-        st.session_state["feedback_df"] = results_to_dataframe(results)
-
-    df = st.session_state["feedback_df"]
+    # Ensure editable text columns are string-typed (NaN floats break data_editor)
+    for _col in ("Notes", "Action"):
+        if _col in df.columns:
+            df[_col] = df[_col].fillna("").astype(str)
 
     # Normalize severity values to title case for consistent counting
     if "Severity" in df.columns:
@@ -631,7 +823,7 @@ def page_review():
 
     edited = st.data_editor(
         filtered,
-        use_container_width=True,
+        width="stretch",
         column_config=column_config,
         disabled=[
             "File", "Title", "Severity", "Confidence", "Category",
@@ -649,6 +841,71 @@ def page_review():
         st.session_state["feedback_df"] = df
 
     st.divider()
+
+    # ── Save feedback to Excel ──────────────────────────────────────────────
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+        "<span style='font-size:20px;'>💾</span>"
+        "<span style='font-size:18px; font-weight:600;'>Save Feedback</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Save your **Action** and **Notes** feedback back to the "
+        "`detailed_code_review.xlsx` file in the output directory."
+    )
+
+    out_dir = st.session_state.get("output_dir", "./out")
+    review_excel_path = os.path.join(out_dir, "detailed_code_review.xlsx")
+
+    save_col1, save_col2 = st.columns([1, 3])
+    with save_col1:
+        if st.button("💾 Save Feedback to Excel", type="primary"):
+            ok = save_feedback_to_excel(df, review_excel_path)
+            if ok:
+                st.session_state["_feedback_saved"] = True
+            else:
+                st.session_state["_feedback_saved"] = False
+
+    with save_col2:
+        if st.session_state.get("_feedback_saved") is True:
+            st.success(f"Feedback saved to `{review_excel_path}`")
+        elif st.session_state.get("_feedback_saved") is False:
+            st.error("Failed to save feedback. Check logs for details.")
+
+    st.divider()
+
+    # ── Deep Analysis Reports (adapter sheets) ────────────────────────────
+    if os.path.isfile(review_excel_path):
+        adapter_sheets = load_adapter_sheets(review_excel_path)
+        if adapter_sheets:
+            st.markdown(
+                "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+                "<span style='font-size:20px;'>🔬</span>"
+                "<span style='font-size:18px; font-weight:600;'>Deep Analysis Reports</span>"
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            st.caption("Results from deep static analysis adapters (Lizard, Flawfinder, CCLS).")
+
+            for adapter_name, adapter_df in adapter_sheets.items():
+                with st.expander(f"**{adapter_name}** — {len(adapter_df)} findings", expanded=False):
+                    # Summary metrics row
+                    if "Severity" in adapter_df.columns:
+                        sev_counts = adapter_df["Severity"].value_counts()
+                        metric_cols = st.columns(min(len(sev_counts), 5))
+                        for i, (sev, count) in enumerate(sev_counts.items()):
+                            if i < len(metric_cols):
+                                metric_cols[i].metric(str(sev).title(), count)
+
+                    st.dataframe(
+                        adapter_df,
+                        width="stretch",
+                        hide_index=True,
+                        height=min(400, 35 * (len(adapter_df) + 1)),
+                    )
+
+            st.divider()
 
     # ── Downloads & proceed ───────────────────────────────────────────────
     st.markdown(
@@ -671,8 +928,8 @@ def page_review():
     with col2:
         # Sanitize non-serializable values before JSON export
         export_df = df.copy()
-        for col in export_df.columns:
-            export_df[col] = export_df[col].apply(
+        for col_name in export_df.columns:
+            export_df[col_name] = export_df[col_name].apply(
                 lambda v: str(v) if v is not None and not isinstance(v, (str, int, float, bool)) else v
             )
         json_str = export_df.to_json(orient="records", indent=2)
@@ -684,7 +941,6 @@ def page_review():
         )
     with col3:
         if st.button("⚡ Proceed to Fix & QA", type="primary"):
-            out_dir = st.session_state.get("output_dir", "./out")
             directives_path = os.path.join(out_dir, "agent_directives.jsonl")
             dataframe_to_directives(df, directives_path)
             st.session_state["directives_path"] = directives_path
@@ -698,42 +954,160 @@ def page_review():
 def page_fixer_qa():
     """Apply fixes based on feedback and run QA validation."""
     st.markdown(
-        "<h2 style='text-align:center; margin-top:-10px;'>"
-        "Fix & QA Validation</h2>",
+        "<div style='display:flex; align-items:center; gap:12px; margin-bottom:16px;'>"
+        "<span style='font-size:36px;'>🔧</span>"
+        "<div>"
+        "<h2 style='margin:0; padding:0;'>Fix & QA Validation</h2>"
+        "<span style='color:#888; font-size:14px;'>Load issues, apply fixes, and validate results</span>"
+        "</div></div>",
         unsafe_allow_html=True,
     )
 
-    directives_path = st.session_state.get("directives_path")
     fixer_in_progress = st.session_state.get("fixer_in_progress", False)
     fixer_complete = st.session_state.get("fixer_complete", False)
+    out_dir = st.session_state.get("output_dir", "./out")
 
-    # ── Section 1: Configuration ──────────────────────────────────────────
+    # ── Section 1: Issue Source Selection ─────────────────────────────────
     if not fixer_in_progress and not fixer_complete:
-        st.markdown("### 1. Fixer Configuration")
+        st.markdown(
+            "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+            "<span style='font-size:20px;'>📂</span>"
+            "<span style='font-size:18px; font-weight:600;'>1. Load Issues</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
-        if not directives_path or not os.path.exists(str(directives_path)):
-            st.warning(
-                "No directives file found. Complete your review on the **Review** page first, "
-                "then click **Proceed to Fix & QA**."
+        # Auto-detect detailed_code_review.xlsx in the output folder
+        auto_excel_path = os.path.join(out_dir, "detailed_code_review.xlsx")
+        has_auto_excel = os.path.isfile(auto_excel_path)
+        has_directives = (
+            st.session_state.get("directives_path")
+            and os.path.exists(str(st.session_state.get("directives_path", "")))
+        )
+
+        source_options = []
+        if has_directives:
+            source_options.append("From Review tab (directives ready)")
+        if has_auto_excel:
+            source_options.append(f"Auto-detected: {os.path.basename(auto_excel_path)}")
+        source_options.append("Browse for Excel file (customer-reported issues)")
+        source_options.append("Upload directives JSONL file")
+
+        source_choice = st.radio(
+            "Select issue source",
+            source_options,
+            index=0,
+            key="fixer_source_choice",
+        )
+
+        directives_path = None
+        fixer_df = None
+
+        # --- From Review tab ---
+        if source_choice.startswith("From Review tab"):
+            directives_path = st.session_state.get("directives_path")
+            st.success(f"Using directives: `{directives_path}`")
+
+        # --- Auto-detected Excel ---
+        elif source_choice.startswith("Auto-detected"):
+            if FEEDBACK_HELPERS_AVAILABLE:
+                fixer_df = load_excel_as_dataframe(auto_excel_path)
+                if fixer_df is not None:
+                    st.success(f"Loaded `{auto_excel_path}` — **{len(fixer_df)}** issues found")
+                    with st.expander("Preview loaded issues", expanded=False):
+                        st.dataframe(fixer_df.head(20), width="stretch", hide_index=True)
+                else:
+                    st.error(f"Failed to load `{auto_excel_path}`")
+                    return
+
+        # --- Browse for customer Excel ---
+        elif source_choice.startswith("Browse for Excel"):
+            browse_path = st_tools.folder_browser(
+                label="Select Excel file with issues",
+                default_path=out_dir,
+                key="fixer_excel_browser",
+                show_files=True,
+                help_text="Browse for a customer-reported .xlsx file with issues to fix.",
             )
-            # Allow manual upload
-            uploaded = st.file_uploader("Or upload a directives JSONL file", type=["jsonl", "json"])
+            # Check if the selected path is an Excel file
+            if browse_path and os.path.isfile(browse_path) and browse_path.endswith((".xlsx", ".xls")):
+                if FEEDBACK_HELPERS_AVAILABLE:
+                    fixer_df = load_excel_as_dataframe(browse_path)
+                    if fixer_df is not None:
+                        st.success(f"Loaded `{browse_path}` — **{len(fixer_df)}** issues found")
+                        with st.expander("Preview loaded issues", expanded=False):
+                            st.dataframe(fixer_df.head(20), width="stretch", hide_index=True)
+                    else:
+                        st.error(f"Failed to load `{browse_path}`")
+                        return
+            elif browse_path:
+                # Also allow uploading via file_uploader as fallback
+                uploaded_excel = st.file_uploader(
+                    "Or upload an Excel file",
+                    type=["xlsx", "xls"],
+                    key="fixer_excel_upload",
+                )
+                if uploaded_excel:
+                    upload_path = os.path.join(out_dir, uploaded_excel.name)
+                    os.makedirs(out_dir, exist_ok=True)
+                    with open(upload_path, "wb") as f:
+                        f.write(uploaded_excel.getbuffer())
+                    if FEEDBACK_HELPERS_AVAILABLE:
+                        fixer_df = load_excel_as_dataframe(upload_path)
+                        if fixer_df is not None:
+                            st.success(f"Uploaded and loaded — **{len(fixer_df)}** issues")
+                        else:
+                            st.error("Failed to parse the uploaded Excel.")
+                            return
+                else:
+                    st.info("Select an `.xlsx` file from the browser above, or upload one.")
+                    return
+
+        # --- Upload JSONL ---
+        elif source_choice.startswith("Upload directives"):
+            uploaded = st.file_uploader(
+                "Upload a directives JSONL file",
+                type=["jsonl", "json"],
+                key="fixer_jsonl_upload",
+            )
             if uploaded:
-                out_dir = st.session_state.get("output_dir", "./out")
                 os.makedirs(out_dir, exist_ok=True)
                 directives_path = os.path.join(out_dir, "agent_directives.jsonl")
                 with open(directives_path, "wb") as f:
                     f.write(uploaded.getbuffer())
                 st.session_state["directives_path"] = directives_path
-                st.success(f"Directives uploaded: {directives_path}")
+                st.success(f"Directives uploaded: `{directives_path}`")
             else:
                 return
 
-        st.success(f"Directives: `{directives_path}`")
+        # If we loaded a DataFrame (Excel source), convert to directives
+        if fixer_df is not None and directives_path is None:
+            if FEEDBACK_HELPERS_AVAILABLE:
+                os.makedirs(out_dir, exist_ok=True)
+                directives_path = os.path.join(out_dir, "agent_directives.jsonl")
+                dataframe_to_directives(fixer_df, directives_path)
+                st.session_state["directives_path"] = directives_path
+                # Also store the DataFrame for traceability
+                if st.session_state.get("feedback_df") is None:
+                    st.session_state["feedback_df"] = fixer_df
+
+        if not directives_path:
+            return
+
+        st.divider()
+
+        # ── Fixer configuration ──────────────────────────────────────────
+        st.markdown(
+            "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+            "<span style='font-size:20px;'>⚙️</span>"
+            "<span style='font-size:18px; font-weight:600;'>2. Fixer Configuration</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
         output_dir = st_tools.folder_browser(
             label="Output Directory for Fixed Files",
-            default_path=st.session_state.get("output_dir", "./out"),
+            default_path=out_dir,
             key="fixer_output_browser",
             show_files=False,
             help_text="Directory where fixed source files will be written.",
@@ -772,9 +1146,15 @@ def page_fixer_qa():
             st.session_state["fixer_in_progress"] = True
             st.rerun()
 
-    # ── Section 2: Execution log ──────────────────────────────────────────
+    # ── Section 3: Execution log ─────────────────────────────────────────
     if fixer_in_progress:
-        st.markdown("### 2. Execution Log")
+        st.markdown(
+            "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+            "<span style='font-size:20px;'>📋</span>"
+            "<span style='font-size:18px; font-weight:600;'>3. Execution Log</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
         phases = FIXER_PHASES if WORKERS_AVAILABLE else {i: f"Phase {i}" for i in range(1, 5)}
         fixer_result_store = st.session_state.get("fixer_result_store", {})
@@ -800,9 +1180,15 @@ def page_fixer_qa():
         time.sleep(0.5)
         st.rerun()
 
-    # ── Section 3: QA Validation ──────────────────────────────────────────
+    # ── Section 4: QA Validation ─────────────────────────────────────────
     if fixer_complete:
-        st.markdown("### 3. QA Validation Results")
+        st.markdown(
+            "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+            "<span style='font-size:20px;'>✅</span>"
+            "<span style='font-size:18px; font-weight:600;'>4. QA Validation Results</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
         # Run QA if not already done
         if not st.session_state.get("qa_results") and QA_INSPECTOR_AVAILABLE:
@@ -828,7 +1214,7 @@ def page_fixer_qa():
                     ] * len(row),
                     axis=1,
                 ),
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
 
@@ -843,8 +1229,14 @@ def page_fixer_qa():
 
         st.divider()
 
-        # ── Section 4: Traceability report ────────────────────────────────
-        st.markdown("### 4. Traceability Report")
+        # ── Section 5: Traceability report ───────────────────────────────
+        st.markdown(
+            "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+            "<span style='font-size:20px;'>📊</span>"
+            "<span style='font-size:18px; font-weight:600;'>5. Traceability Report</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
         feedback_df = st.session_state.get("feedback_df")
         fixer_result_store = st.session_state.get("fixer_result_store", {})
@@ -857,7 +1249,7 @@ def page_fixer_qa():
                 fixer_results=fixer_results,
                 audit_report_path=audit_path,
             )
-            st.dataframe(trace_df, use_container_width=True, hide_index=True)
+            st.dataframe(trace_df, width="stretch", hide_index=True)
 
             # Downloads
             col1, col2, col3 = st.columns(3)
@@ -894,6 +1286,1031 @@ def page_fixer_qa():
                                 )
         else:
             st.caption("No feedback data available for traceability report.")
+
+        # ── Reset button ─────────────────────────────────────────────────
+        st.divider()
+        if st.button("🔄 Reset & Run Again"):
+            st.session_state["fixer_in_progress"] = False
+            st.session_state["fixer_complete"] = False
+            st.session_state["fixer_logs"] = []
+            st.session_state["fixer_phase_statuses"] = {}
+            st.session_state["qa_results"] = []
+            st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PAGE: Fixer Audit Review
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _load_audit_excel(path: str) -> Dict[str, Optional[pd.DataFrame]]:
+    """
+    Load final_execution_audit.xlsx and return its sheets as DataFrames.
+
+    Returns dict with keys:
+        "audit_log"      — the main results sheet
+        "decision_trail" — detailed audit trail (may be None)
+        "summary"        — summary metadata (may be None)
+    """
+    result: Dict[str, Optional[pd.DataFrame]] = {
+        "audit_log": None,
+        "decision_trail": None,
+        "summary": None,
+    }
+    try:
+        xls = pd.ExcelFile(path, engine="openpyxl")
+        for sheet in xls.sheet_names:
+            lower = sheet.lower().strip()
+            df = pd.read_excel(xls, sheet_name=sheet, engine="openpyxl")
+            if "audit" in lower and "log" in lower:
+                result["audit_log"] = df
+            elif "decision" in lower or "trail" in lower:
+                result["decision_trail"] = df
+            elif "summary" in lower:
+                result["summary"] = df
+            else:
+                # Fall back: first non-summary sheet becomes audit_log
+                if result["audit_log"] is None:
+                    result["audit_log"] = df
+    except Exception as e:
+        logger.error("Failed to load audit Excel %s: %s", path, e)
+    return result
+
+
+def _save_audit_feedback(
+    df: pd.DataFrame,
+    excel_path: str,
+    sheet_name: str = "Audit Log",
+) -> bool:
+    """
+    Write user feedback (Accepted, Feedback_Notes) columns back
+    into the final_execution_audit.xlsx.
+    """
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(excel_path)
+
+        ws = None
+        for name in wb.sheetnames:
+            if sheet_name.lower() in name.lower():
+                ws = wb[name]
+                break
+        if ws is None:
+            ws = wb.active
+
+        # Build header map
+        header_map = {}
+        for col_idx in range(1, ws.max_column + 1):
+            val = ws.cell(row=1, column=col_idx).value
+            if val:
+                header_map[str(val).strip()] = col_idx
+
+        # Ensure feedback columns exist
+        next_col = ws.max_column + 1
+        if "Accepted" not in header_map:
+            ws.cell(row=1, column=next_col, value="Accepted")
+            header_map["Accepted"] = next_col
+            next_col += 1
+        if "Feedback_Notes" not in header_map:
+            ws.cell(row=1, column=next_col, value="Feedback_Notes")
+            header_map["Feedback_Notes"] = next_col
+
+        accepted_col = header_map["Accepted"]
+        notes_col = header_map["Feedback_Notes"]
+
+        # Build lookup
+        fp_col = header_map.get("file_path")
+        ln_col = header_map.get("line_number")
+        it_col = header_map.get("issue_type")
+
+        feedback_lookup = {}
+        for _, row in df.iterrows():
+            key = (
+                str(row.get("file_path", "")).strip(),
+                str(row.get("line_number", "")).strip(),
+                str(row.get("issue_type", "")).strip(),
+            )
+            feedback_lookup[key] = (
+                str(row.get("Accepted", "")).strip(),
+                str(row.get("Feedback_Notes", "")).strip(),
+            )
+
+        updated = 0
+        for row_idx in range(2, ws.max_row + 1):
+            fp_val = str(ws.cell(row=row_idx, column=fp_col).value or "").strip() if fp_col else ""
+            ln_val = str(ws.cell(row=row_idx, column=ln_col).value or "").strip() if ln_col else ""
+            it_val = str(ws.cell(row=row_idx, column=it_col).value or "").strip() if it_col else ""
+
+            key = (fp_val, ln_val, it_val)
+            if key in feedback_lookup:
+                accepted, notes = feedback_lookup[key]
+                ws.cell(row=row_idx, column=accepted_col, value=accepted)
+                ws.cell(row=row_idx, column=notes_col, value=notes)
+                updated += 1
+
+        wb.save(excel_path)
+        logger.info("Updated %d rows in audit report with feedback", updated)
+        return True
+    except Exception as e:
+        logger.error("Failed to save audit feedback: %s", e, exc_info=True)
+        return False
+
+
+def page_fixer_audit():
+    """Review the fixer pipeline output (final_execution_audit.xlsx) and provide feedback."""
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:12px; margin-bottom:16px;'>"
+        "<span style='font-size:36px;'>📋</span>"
+        "<div>"
+        "<h2 style='margin:0; padding:0;'>Fixer Audit Review</h2>"
+        "<span style='color:#888; font-size:14px;'>"
+        "Review fixer results, accept or reject fixes, and provide feedback"
+        "</span>"
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    out_dir = st.session_state.get("output_dir", "./out")
+
+    # ── Section 1: Load Audit Report ──────────────────────────────────────
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+        "<span style='font-size:20px;'>📂</span>"
+        "<span style='font-size:18px; font-weight:600;'>1. Load Audit Report</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Auto-detect
+    auto_path = os.path.join(out_dir, "final_execution_audit.xlsx")
+    has_auto = os.path.isfile(auto_path)
+
+    source_options = []
+    if has_auto:
+        source_options.append(f"Auto-detected: {os.path.basename(auto_path)}")
+    source_options.append("Browse for audit Excel file")
+    # Check if fixer results are in session state
+    fixer_store = st.session_state.get("fixer_result_store", {})
+    if fixer_store.get("audit_report_path") and os.path.isfile(str(fixer_store.get("audit_report_path", ""))):
+        source_options.insert(0, "From Fix & QA tab (latest run)")
+
+    source_choice = st.radio(
+        "Select audit report source",
+        source_options,
+        index=0,
+        key="audit_source_choice",
+        label_visibility="collapsed",
+    )
+
+    audit_path = None
+    if source_choice.startswith("From Fix & QA"):
+        audit_path = fixer_store.get("audit_report_path")
+    elif source_choice.startswith("Auto-detected"):
+        audit_path = auto_path
+    elif source_choice.startswith("Browse"):
+        browse_path = st_tools.folder_browser(
+            label="Select audit Excel file",
+            default_path=out_dir,
+            key="audit_excel_browser",
+            show_files=True,
+            file_extensions=[".xlsx", ".xls"],
+            help_text="Browse for a final_execution_audit.xlsx file.",
+        )
+        if browse_path and os.path.isfile(browse_path):
+            audit_path = browse_path
+
+    if not audit_path or not os.path.isfile(str(audit_path)):
+        st.info(
+            "No audit report found. Run the fixer pipeline on the **Fix & QA** tab first, "
+            "or browse for an existing `final_execution_audit.xlsx` file."
+        )
+        return
+
+    st.success(f"Loaded: `{audit_path}`")
+
+    # Load the Excel
+    sheets = _load_audit_excel(audit_path)
+    audit_df = sheets.get("audit_log")
+    trail_df = sheets.get("decision_trail")
+    summary_df = sheets.get("summary")
+
+    if audit_df is None or audit_df.empty:
+        st.warning("The audit report is empty or could not be parsed.")
+        return
+
+    st.divider()
+
+    # ── Section 2: Summary ────────────────────────────────────────────────
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+        "<span style='font-size:20px;'>📊</span>"
+        "<span style='font-size:18px; font-weight:600;'>2. Execution Summary</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    # Compute stats from audit_df
+    total = len(audit_df)
+    status_col = "final_status" if "final_status" in audit_df.columns else None
+
+    if status_col:
+        fixed = (audit_df[status_col].astype(str).str.upper() == "FIXED").sum()
+        failed = audit_df[status_col].astype(str).str.upper().str.contains("FAIL").sum()
+        skipped = (audit_df[status_col].astype(str).str.upper() == "SKIPPED").sum()
+        other = total - fixed - failed - skipped
+
+        m1, m2, m3, m4 = st.columns(4)
+        with m1:
+            st.metric("Total Tasks", total)
+        with m2:
+            st.metric("Fixed", fixed)
+        with m3:
+            st.metric("Failed", failed)
+        with m4:
+            st.metric("Skipped", skipped)
+
+        # Status breakdown chart
+        if total > 0:
+            status_counts = audit_df[status_col].astype(str).value_counts()
+            st.bar_chart(status_counts, width="stretch", height=200)
+    else:
+        st.metric("Total Entries", total)
+
+    # Show summary sheet if present
+    if summary_df is not None and not summary_df.empty:
+        with st.expander("Raw Summary Metadata", expanded=False):
+            st.dataframe(summary_df, width="stretch", hide_index=True)
+
+    st.divider()
+
+    # ── Section 3: Audit Log with Feedback ────────────────────────────────
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+        "<span style='font-size:20px;'>📝</span>"
+        "<span style='font-size:18px; font-weight:600;'>3. Audit Log — Review & Feedback</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Review each fix result. Set **Accepted** to indicate whether you approve "
+        "the fix, and add **Feedback_Notes** for any corrections or comments."
+    )
+
+    # Add feedback columns if not present
+    if "Accepted" not in audit_df.columns:
+        audit_df["Accepted"] = "Yes"
+    if "Feedback_Notes" not in audit_df.columns:
+        audit_df["Feedback_Notes"] = ""
+
+    # Fill NaN
+    audit_df["Accepted"] = audit_df["Accepted"].fillna("Yes")
+    audit_df["Feedback_Notes"] = audit_df["Feedback_Notes"].fillna("")
+
+    # Configure column display
+    column_config = {
+        "Accepted": st.column_config.SelectboxColumn(
+            "Accepted",
+            options=["Yes", "No", "Partial"],
+            default="Yes",
+            help="Accept, reject, or partially accept this fix.",
+            width="small",
+        ),
+        "Feedback_Notes": st.column_config.TextColumn(
+            "Feedback Notes",
+            help="Comments on the fix quality, issues, or suggestions.",
+            width="medium",
+        ),
+    }
+
+    # Color-code status
+    if status_col and status_col in audit_df.columns:
+        column_config[status_col] = st.column_config.TextColumn(
+            "Status",
+            width="small",
+        )
+
+    # Severity filter
+    filter_col1, filter_col2 = st.columns(2)
+    display_df = audit_df.copy()
+
+    with filter_col1:
+        if status_col and status_col in audit_df.columns:
+            statuses = ["All"] + sorted(audit_df[status_col].astype(str).unique().tolist())
+            status_filter = st.selectbox("Filter by Status", statuses, key="audit_status_filter")
+            if status_filter != "All":
+                display_df = display_df[display_df[status_col].astype(str) == status_filter]
+
+    with filter_col2:
+        if "severity" in audit_df.columns:
+            severities = ["All"] + sorted(audit_df["severity"].astype(str).unique().tolist())
+            sev_filter = st.selectbox("Filter by Severity", severities, key="audit_severity_filter")
+            if sev_filter != "All":
+                display_df = display_df[display_df["severity"].astype(str) == sev_filter]
+
+    st.caption(f"Showing **{len(display_df)}** of **{len(audit_df)}** entries")
+
+    # Editable data editor
+    edited_df = st.data_editor(
+        display_df,
+        column_config=column_config,
+        width="stretch",
+        hide_index=True,
+        num_rows="fixed",
+        key="audit_editor",
+    )
+
+    # Merge edits back into the full DataFrame (in case filters are active)
+    if edited_df is not None and not edited_df.equals(display_df):
+        # Update only the feedback columns
+        for idx in edited_df.index:
+            if idx in audit_df.index:
+                audit_df.at[idx, "Accepted"] = edited_df.at[idx, "Accepted"]
+                audit_df.at[idx, "Feedback_Notes"] = edited_df.at[idx, "Feedback_Notes"]
+
+    st.divider()
+
+    # ── Section 4: Decision Trail (read-only) ─────────────────────────────
+    if trail_df is not None and not trail_df.empty:
+        st.markdown(
+            "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+            "<span style='font-size:20px;'>🔍</span>"
+            "<span style='font-size:18px; font-weight:600;'>4. Decision Trail</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption("Detailed audit trail of every decision made by the fixer agent.")
+
+        with st.expander(f"Decision Trail ({len(trail_df)} entries)", expanded=False):
+            st.dataframe(trail_df, width="stretch", hide_index=True)
+
+        st.divider()
+
+    # ── Section 5: Save & Export ──────────────────────────────────────────
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+        "<span style='font-size:20px;'>💾</span>"
+        "<span style='font-size:18px; font-weight:600;'>"
+        f"{'5' if trail_df is not None else '4'}. Save Feedback & Export"
+        "</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    save_col1, save_col2, save_col3, save_col4 = st.columns(4)
+
+    with save_col1:
+        if st.button("💾 Save Feedback to Excel", type="primary", key="audit_save_btn"):
+            ok = _save_audit_feedback(audit_df, audit_path)
+            if ok:
+                st.session_state["_audit_feedback_saved"] = True
+            else:
+                st.session_state["_audit_feedback_saved"] = False
+
+    with save_col2:
+        # Download full audit with feedback
+        if FEEDBACK_HELPERS_AVAILABLE:
+            audit_bytes = export_to_excel_bytes(audit_df, sheet_name="Audit Log")
+            st.download_button(
+                "📥 Download Audit (Excel)",
+                data=audit_bytes,
+                file_name="fixer_audit_with_feedback.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+    with save_col3:
+        # Export rejected items for re-analysis
+        rejected = audit_df[audit_df["Accepted"].astype(str).str.strip() == "No"]
+        if not rejected.empty:
+            rej_bytes = export_to_excel_bytes(rejected, sheet_name="Rejected Fixes")
+            st.download_button(
+                f"📥 Rejected Fixes ({len(rejected)})",
+                data=rej_bytes,
+                file_name="rejected_fixes.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+    with save_col4:
+        # Feedback summary stats
+        accepted_count = (audit_df["Accepted"].astype(str).str.strip() == "Yes").sum()
+        rejected_count = (audit_df["Accepted"].astype(str).str.strip() == "No").sum()
+        partial_count = (audit_df["Accepted"].astype(str).str.strip() == "Partial").sum()
+        st.caption(
+            f"Accepted: **{accepted_count}** · "
+            f"Rejected: **{rejected_count}** · "
+            f"Partial: **{partial_count}**"
+        )
+
+    if st.session_state.get("_audit_feedback_saved") is True:
+        st.success(f"Feedback saved to `{audit_path}`")
+    elif st.session_state.get("_audit_feedback_saved") is False:
+        st.error("Failed to save feedback. Check logs.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PAGE: Constraints Generator
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Paths to the template / prompt files (relative to project root)
+_CONSTRAINTS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "agents", "constraints")
+_TEMPLATE_PATH = os.path.join(_CONSTRAINTS_DIR, "TEMPLATE_constraints.md")
+_PROMPT_PATH = os.path.join(_CONSTRAINTS_DIR, "GENERATE_CONSTRAINTS_PROMPT.md")
+
+
+def _load_text_file(path: str) -> str:
+    """Load a text file, returning empty string on failure."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def _build_constraint_generation_prompt(
+    source_filename: str,
+    source_code: str,
+    issues_to_ignore: str,
+    fix_guidelines: str,
+    existing_issues_text: str,
+    template_text: str,
+    generator_prompt_text: str,
+) -> str:
+    """
+    Build the full LLM prompt that combines:
+    - The GENERATE_CONSTRAINTS_PROMPT instructions
+    - The TEMPLATE for output format reference
+    - User-supplied source code, false-positive list, and fix guidelines
+    - Issues from the Excel (if provided)
+    """
+    # Extract just the "PROMPT" section from GENERATE_CONSTRAINTS_PROMPT.md
+    # (everything after "## PROMPT (copy everything below this line)")
+    prompt_section = generator_prompt_text
+    marker = "## PROMPT (copy everything below this line)"
+    idx = generator_prompt_text.find(marker)
+    if idx >= 0:
+        prompt_section = generator_prompt_text[idx + len(marker):].strip()
+
+    parts = [prompt_section]
+
+    parts.append(f"\n### REFERENCE TEMPLATE\nUse this exact structure for the output:\n\n```markdown\n{template_text}\n```")
+
+    parts.append(f"\n### INPUT\n\n**Source file**: `{source_filename}`\n")
+
+    if existing_issues_text:
+        parts.append(
+            f"**Issues from analysis report** (these are issues the tool flagged — "
+            f"review them and convert false positives into IGNORE rules, "
+            f"and genuine issues into Resolution Rules):\n\n{existing_issues_text}\n"
+        )
+
+    if issues_to_ignore.strip():
+        parts.append(f"**Issues to ignore (false positives)**:\n{issues_to_ignore.strip()}\n")
+
+    if fix_guidelines.strip():
+        parts.append(f"**Fix guidelines**:\n{fix_guidelines.strip()}\n")
+
+    if source_code.strip():
+        parts.append(f"**Source code**:\n```\n{source_code.strip()}\n```\n")
+
+    parts.append("\nNow generate the constraints file. Output ONLY the Markdown content, no extra commentary.")
+
+    return "\n\n".join(parts)
+
+
+def _format_excel_issues_for_prompt(df: pd.DataFrame, target_file: str = "") -> str:
+    """
+    Format issues from a DataFrame (detailed_code_review.xlsx format)
+    into a text block suitable for the LLM prompt.
+
+    If target_file is specified, only include issues for that file.
+    """
+    if df is None or df.empty:
+        return ""
+
+    # Filter to target file if specified
+    if target_file:
+        stem = Path(target_file).stem
+        mask = df["File"].astype(str).apply(
+            lambda f: stem in f or target_file in f
+        )
+        df = df[mask]
+
+    if df.empty:
+        return ""
+
+    lines = []
+    for _, row in df.iterrows():
+        severity = str(row.get("Severity", "")).strip()
+        title = str(row.get("Title", "")).strip()
+        line_no = str(row.get("Line", "")).strip()
+        category = str(row.get("Category", "")).strip()
+        desc = str(row.get("Description", "")).strip()
+        suggestion = str(row.get("Suggestion", "")).strip()
+        code = str(row.get("Code", "")).strip()
+        action = str(row.get("Action", row.get("Feedback", ""))).strip()
+
+        entry = f"- [{severity}] {title} (Line {line_no}, {category}): {desc}"
+        if suggestion:
+            entry += f"\n  Suggestion: {suggestion}"
+        if code:
+            entry += f"\n  Code: `{code[:200]}`"
+        if action and action.lower() in ("skip", "review"):
+            entry += f"\n  User action: {action}"
+        lines.append(entry)
+
+    return "\n".join(lines)
+
+
+def page_constraints_generator():
+    """UI page for generating <filename>_constraints.md files using LLM."""
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:12px; margin-bottom:16px;'>"
+        "<span style='font-size:36px;'>📐</span>"
+        "<div>"
+        "<h2 style='margin:0; padding:0;'>Constraints Generator</h2>"
+        "<span style='color:#888; font-size:14px;'>"
+        "Create constraint files to suppress false positives and guide code fixes"
+        "</span>"
+        "</div></div>",
+        unsafe_allow_html=True,
+    )
+
+    # Load template and prompt
+    template_text = _load_text_file(_TEMPLATE_PATH)
+    generator_prompt_text = _load_text_file(_PROMPT_PATH)
+
+    if not template_text:
+        st.warning(f"Template file not found: `{_TEMPLATE_PATH}`")
+    if not generator_prompt_text:
+        st.warning(f"Generator prompt not found: `{_PROMPT_PATH}`")
+
+    # ── Section 1: Source File ────────────────────────────────────────────
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+        "<span style='font-size:20px;'>📄</span>"
+        "<span style='font-size:18px; font-weight:600;'>1. Source File</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    source_file_path = st_tools.folder_browser(
+        label="Source File Path",
+        default_path=st.session_state.get("codebase_path", ""),
+        key="constraints_source_browser",
+        show_files=True,
+        file_extensions=[".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"],
+        help_text="Path to the source file you want to create constraints for.",
+    )
+
+    source_code = ""
+    source_filename = ""
+    if source_file_path and os.path.isfile(source_file_path):
+        source_filename = os.path.basename(source_file_path)
+        try:
+            with open(source_file_path, "r", encoding="utf-8", errors="replace") as f:
+                source_code = f.read()
+            st.success(f"Loaded `{source_filename}` ({len(source_code):,} chars)")
+        except Exception as e:
+            st.error(f"Failed to read file: {e}")
+    elif source_file_path:
+        # User may have typed just a filename
+        source_filename = os.path.basename(source_file_path)
+        st.info(f"File not found at path — you can still type issues manually. Target: `{source_filename}`")
+
+    st.divider()
+
+    # ── Section 2: Issues Excel (optional) ────────────────────────────────
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+        "<span style='font-size:20px;'>📊</span>"
+        "<span style='font-size:18px; font-weight:600;'>2. Issues from Analysis (optional)</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "Load issues from a `detailed_code_review.xlsx` file. "
+        "The LLM will analyze these issues and convert false positives into IGNORE rules."
+    )
+
+    issues_df = None
+    out_dir = st.session_state.get("output_dir", "./out")
+
+    issues_source = st.radio(
+        "Issue source",
+        [
+            "Auto-detect from output folder",
+            "Browse for Excel file",
+            "Use issues from Review tab",
+            "Skip (manual entry only)",
+        ],
+        horizontal=True,
+        key="constraints_issues_source",
+        label_visibility="collapsed",
+    )
+
+    if issues_source == "Auto-detect from output folder":
+        auto_path = os.path.join(out_dir, "detailed_code_review.xlsx")
+        if os.path.isfile(auto_path) and FEEDBACK_HELPERS_AVAILABLE:
+            issues_df = load_excel_as_dataframe(auto_path)
+            if issues_df is not None:
+                st.success(f"Loaded `{auto_path}` — **{len(issues_df)}** issues")
+            else:
+                st.warning("Could not parse the Excel file.")
+        else:
+            st.info("No `detailed_code_review.xlsx` found in output folder.")
+
+    elif issues_source == "Browse for Excel file":
+        excel_path = st_tools.folder_browser(
+            label="Select Excel file",
+            default_path=out_dir,
+            key="constraints_excel_browser",
+            show_files=True,
+            file_extensions=[".xlsx", ".xls"],
+            help_text="Browse for an analysis Excel file.",
+        )
+        if excel_path and os.path.isfile(excel_path) and FEEDBACK_HELPERS_AVAILABLE:
+            issues_df = load_excel_as_dataframe(excel_path)
+            if issues_df is not None:
+                st.success(f"Loaded — **{len(issues_df)}** issues")
+
+    elif issues_source == "Use issues from Review tab":
+        review_df = st.session_state.get("feedback_df")
+        if review_df is not None:
+            issues_df = review_df
+            st.success(f"Using **{len(issues_df)}** issues from the Review tab")
+        else:
+            st.info("No issues available from the Review tab. Run analysis first.")
+
+    # Show preview pane if issues loaded
+    if issues_df is not None and not issues_df.empty:
+        preview_cols = [c for c in ["File", "Title", "Severity", "Category", "Line", "Description", "Suggestion"] if c in issues_df.columns]
+        preview_df = issues_df[preview_cols] if preview_cols else issues_df
+
+        # Summary metrics row
+        st.markdown(
+            "<div style='display:flex; align-items:center; gap:8px; margin-top:8px; margin-bottom:4px;'>"
+            "<span style='font-size:16px;'>🔎</span>"
+            "<span style='font-size:15px; font-weight:600;'>Issues Preview</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        if "Severity" in issues_df.columns:
+            sev_counts = issues_df["Severity"].astype(str).str.strip().str.title().value_counts()
+            metric_cols = st.columns(min(len(sev_counts) + 1, 6))
+            metric_cols[0].metric("Total", len(issues_df))
+            for i, (sev, count) in enumerate(sev_counts.items()):
+                if i + 1 < len(metric_cols):
+                    metric_cols[i + 1].metric(sev, count)
+
+        # File-filtered view if a source file is selected
+        if source_filename and "File" in issues_df.columns:
+            stem = Path(source_filename).stem
+            file_mask = issues_df["File"].astype(str).apply(lambda f: stem in f)
+            file_issues = issues_df[file_mask]
+            file_preview_cols = [c for c in preview_cols if c != "File"]
+
+            if not file_issues.empty:
+                with st.expander(f"Issues for `{source_filename}` ({len(file_issues)} found)", expanded=True):
+                    st.dataframe(
+                        file_issues[file_preview_cols].head(50) if file_preview_cols else file_issues.head(50),
+                        width="stretch",
+                        hide_index=True,
+                    )
+            else:
+                st.info(f"No issues found specifically for `{source_filename}`. All issues will be included as context.")
+
+        # Full issues table
+        with st.expander(f"All Issues ({len(issues_df)} total)", expanded=False):
+            st.dataframe(
+                preview_df.head(100),
+                width="stretch",
+                hide_index=True,
+            )
+
+    st.divider()
+
+    # ── Section 3: Manual Inputs ──────────────────────────────────────────
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+        "<span style='font-size:20px;'>✏️</span>"
+        "<span style='font-size:18px; font-weight:600;'>3. Manual Inputs</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    issues_to_ignore = st.text_area(
+        "Issues to Ignore (false positives)",
+        height=120,
+        placeholder=(
+            "One per line. Example:\n"
+            "- IGNORE NULL check for `vdev` in dp_rx_process() — validated at entry point\n"
+            "- IGNORE bounds check for `queue_id` — hardware-limited to MAX_QUEUES\n"
+            "- IGNORE unused parameter `cookie` — required by kernel callback signature"
+        ),
+        key="constraints_ignore_list",
+    )
+
+    fix_guidelines = st.text_area(
+        "Fix Guidelines (optional)",
+        height=100,
+        placeholder=(
+            "Example:\n"
+            "- Don't add locks in ISR paths\n"
+            "- Use kernel error codes (-EINVAL, -ENOMEM), not custom enums\n"
+            "- Prefer devm_kzalloc for configuration data"
+        ),
+        key="constraints_fix_guidelines",
+    )
+
+    include_source = st.checkbox(
+        "Include source code in prompt (helps LLM infer additional constraints)",
+        value=bool(source_code),
+        key="constraints_include_source",
+    )
+
+    st.divider()
+
+    # ── Section 4: Generate ───────────────────────────────────────────────
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+        "<span style='font-size:20px;'>🤖</span>"
+        "<span style='font-size:18px; font-weight:600;'>4. Generate Constraints File</span>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+    if not source_filename:
+        st.warning("Select or enter a source file path above to generate constraints.")
+        return
+
+    target_stem = Path(source_filename).stem
+    output_name = f"{target_stem}_constraints.md"
+    st.info(f"Will generate: **`{output_name}`**")
+
+    gen_col1, gen_col2 = st.columns([1, 3])
+
+    with gen_col1:
+        generate_clicked = st.button("🤖 Generate with LLM", type="primary", key="constraints_generate_btn")
+
+    with gen_col2:
+        use_template = st.button("📝 Start from Template", key="constraints_template_btn")
+
+    # ── Generate from template (no LLM) ──────────────────────────────────
+    if use_template:
+        # Pre-fill the template with the filename
+        filled = template_text.replace("<FILENAME>", source_filename)
+        filled = filled.replace(
+            "# NAMING CONVENTION:",
+            f"# Generated for: {source_filename}\n# NAMING CONVENTION:",
+        )
+        st.session_state["constraints_generated_md"] = filled
+
+    # ── Generate with LLM ────────────────────────────────────────────────
+    if generate_clicked:
+        # Build the issues text from Excel
+        existing_issues_text = ""
+        if issues_df is not None:
+            existing_issues_text = _format_excel_issues_for_prompt(issues_df, source_filename)
+
+        # Build the full prompt
+        full_prompt = _build_constraint_generation_prompt(
+            source_filename=source_filename,
+            source_code=source_code if include_source else "",
+            issues_to_ignore=issues_to_ignore,
+            fix_guidelines=fix_guidelines,
+            existing_issues_text=existing_issues_text,
+            template_text=template_text,
+            generator_prompt_text=generator_prompt_text,
+        )
+
+        # Call the LLM
+        with st.spinner("Generating constraints with LLM..."):
+            try:
+                from utils.common.llm_tools import LLMTools
+                llm = LLMTools()
+                response = llm.llm_call(full_prompt)
+
+                # Clean up response — strip markdown code fences if the LLM wrapped it
+                cleaned = response.strip()
+                if cleaned.startswith("```markdown"):
+                    cleaned = cleaned[len("```markdown"):].strip()
+                elif cleaned.startswith("```md"):
+                    cleaned = cleaned[len("```md"):].strip()
+                elif cleaned.startswith("```"):
+                    cleaned = cleaned[3:].strip()
+                if cleaned.endswith("```"):
+                    cleaned = cleaned[:-3].strip()
+
+                st.session_state["constraints_generated_md"] = cleaned
+                st.success("Constraints file generated successfully!")
+
+            except Exception as e:
+                st.error(f"LLM call failed: {e}")
+                logger.error("Constraint generation LLM call failed", exc_info=True)
+
+    # ── Section 5: Preview & Edit ─────────────────────────────────────────
+    generated_md = st.session_state.get("constraints_generated_md", "")
+    if generated_md:
+        st.divider()
+        st.markdown(
+            "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+            "<span style='font-size:20px;'>👁️</span>"
+            "<span style='font-size:18px; font-weight:600;'>5. Preview & Edit</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        # Editable text area with the generated content
+        edited_md = st.text_area(
+            "Edit the generated constraints file",
+            value=generated_md,
+            height=500,
+            key="constraints_editor",
+        )
+
+        # Preview as rendered markdown
+        with st.expander("Preview (rendered Markdown)", expanded=False):
+            st.markdown(edited_md, unsafe_allow_html=True)
+
+        st.divider()
+
+        # ── Section 6: Save & Download ────────────────────────────────────
+        st.markdown(
+            "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
+            "<span style='font-size:20px;'>💾</span>"
+            "<span style='font-size:18px; font-weight:600;'>6. Save & Download</span>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
+
+        save_col1, save_col2, save_col3 = st.columns(3)
+
+        with save_col1:
+            # Save directly to agents/constraints/
+            if st.button("💾 Save to Constraints Folder", type="primary"):
+                save_path = os.path.join(_CONSTRAINTS_DIR, output_name)
+                try:
+                    os.makedirs(_CONSTRAINTS_DIR, exist_ok=True)
+                    with open(save_path, "w", encoding="utf-8") as f:
+                        f.write(edited_md)
+                    st.success(f"Saved to `{save_path}`")
+                except Exception as e:
+                    st.error(f"Failed to save: {e}")
+
+        with save_col2:
+            # Download
+            st.download_button(
+                "📥 Download",
+                data=edited_md,
+                file_name=output_name,
+                mime="text/markdown",
+            )
+
+        with save_col3:
+            # Clear / reset
+            if st.button("🗑️ Clear"):
+                st.session_state["constraints_generated_md"] = ""
+                st.rerun()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  PAGE: Telemetry Dashboard
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def page_telemetry():
+    """Telemetry dashboard showing framework usage patterns and statistics."""
+    st.markdown(
+        "<h2 style='text-align:center; margin-top:-10px;'>"
+        "📈 Telemetry Dashboard</h2>",
+        unsafe_allow_html=True,
+    )
+
+    # Try to load TelemetryService
+    telemetry = None
+    try:
+        from db.telemetry_service import TelemetryService
+        from utils.parsers.global_config_parser import GlobalConfig
+        gc = GlobalConfig()
+        conn_str = gc.get("POSTGRES_CONNECTION")
+        if conn_str:
+            telemetry = TelemetryService(connection_string=conn_str)
+    except Exception:
+        pass
+
+    if telemetry is None or not telemetry.enabled:
+        st.info(
+            "Telemetry is not available. Ensure PostgreSQL is configured "
+            "and `telemetry.enable: true` is set in global_config.yaml."
+        )
+        return
+
+    # ── Summary metrics ──────────────────────────────────────────────────
+    stats = telemetry.get_summary_stats()
+    if not stats:
+        st.info("No telemetry data recorded yet. Run an analysis to start collecting metrics.")
+        return
+
+    st.markdown("### Overview")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Runs", stats.get("total_runs", 0))
+    m2.metric("Total Issues Found", stats.get("total_issues", 0))
+    m3.metric("Total Issues Fixed", stats.get("total_fixed", 0))
+    m4.metric(
+        "Fix Success Rate",
+        f"{stats.get('fix_success_rate', 0)}%"
+    )
+
+    m5, m6, m7, m8 = st.columns(4)
+    m5.metric("Analysis Runs", stats.get("analysis_runs", 0))
+    m6.metric("Fixer Runs", stats.get("fixer_runs", 0))
+    m7.metric("Patch Runs", stats.get("patch_runs", 0))
+    m8.metric("Avg Duration", f"{stats.get('avg_duration', 0):.1f}s")
+
+    st.markdown("---")
+
+    # ── Runs over time ───────────────────────────────────────────────────
+    runs_by_date = stats.get("runs_by_date", {})
+    if runs_by_date:
+        st.markdown("### Runs Over Time (Last 30 Days)")
+        chart_df = pd.DataFrame(
+            list(runs_by_date.items()),
+            columns=["Date", "Runs"],
+        )
+        chart_df["Date"] = pd.to_datetime(chart_df["Date"])
+        st.bar_chart(chart_df.set_index("Date"))
+
+    # ── Issues by severity ───────────────────────────────────────────────
+    col_sev, col_types = st.columns(2)
+
+    with col_sev:
+        issues_by_sev = stats.get("issues_by_severity", {})
+        if issues_by_sev:
+            st.markdown("### Issues by Severity")
+            sev_df = pd.DataFrame(
+                list(issues_by_sev.items()),
+                columns=["Severity", "Count"],
+            )
+            st.bar_chart(sev_df.set_index("Severity"))
+
+    with col_types:
+        top_types = stats.get("top_issue_types", {})
+        if top_types:
+            st.markdown("### Top Issue Types")
+            types_df = pd.DataFrame(
+                list(top_types.items()),
+                columns=["Issue Type", "Count"],
+            )
+            st.dataframe(types_df, width="stretch", hide_index=True)
+
+    # ── LLM usage stats ──────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### LLM Usage")
+    llm_col1, llm_col2 = st.columns(2)
+
+    with llm_col1:
+        st.metric("Total LLM Calls", stats.get("total_llm_calls", 0))
+        st.metric("Total Prompt Tokens", f"{stats.get('total_prompt_tokens', 0):,}")
+
+    with llm_col2:
+        st.metric("Total Completion Tokens", f"{stats.get('total_completion_tokens', 0):,}")
+        llm_usage = telemetry.get_llm_usage_stats()
+        by_model = llm_usage.get("by_model", [])
+        if by_model:
+            llm_df = pd.DataFrame(by_model)
+            st.dataframe(llm_df, width="stretch", hide_index=True)
+
+    # ── Recent runs table ────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### Recent Runs")
+    recent = telemetry.get_recent_runs(limit=25)
+    if recent:
+        display_cols = [
+            "run_id", "created_at", "mode", "status",
+            "files_analyzed", "issues_total", "issues_fixed",
+            "issues_skipped", "issues_failed", "duration_seconds",
+            "llm_model", "use_ccls",
+        ]
+        runs_df = pd.DataFrame(recent)
+        # Only show columns that exist
+        available = [c for c in display_cols if c in runs_df.columns]
+        st.dataframe(runs_df[available], width="stretch", hide_index=True)
+
+        # Drill-down into a run
+        run_ids = [r["run_id"] for r in recent]
+        selected_run = st.selectbox("View events for run:", ["(select)"] + run_ids)
+        if selected_run and selected_run != "(select)":
+            events = telemetry.get_run_events(selected_run)
+            if events:
+                ev_df = pd.DataFrame(events)
+                ev_cols = [c for c in [
+                    "created_at", "event_type", "file_path",
+                    "issue_type", "severity", "llm_model",
+                    "prompt_tokens", "completion_tokens", "latency_ms",
+                ] if c in ev_df.columns]
+                st.dataframe(ev_df[ev_cols], width="stretch", hide_index=True)
+            else:
+                st.info("No events recorded for this run.")
+    else:
+        st.info("No runs recorded yet.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1104,10 +2521,12 @@ def main():
     elif page == "About":
         page_about()
     else:
-        # Workflow tabs — the four main workflow stages
-        tab_analyze, tab_pipeline, tab_review, tab_fixqa = st.tabs(
-            ["📊 Analyze", "⚙️ Pipeline", "📝 Review", "🔧 Fix & QA"]
-        )
+        # Workflow tabs — the seven main workflow stages
+        (tab_analyze, tab_pipeline, tab_review, tab_fixqa,
+         tab_audit, tab_constraints, tab_telemetry) = st.tabs([
+            "📊 Analyze", "⚙️ Pipeline", "📝 Review", "🔧 Fix & QA",
+            "📋 Audit", "📐 Constraints", "📈 Telemetry",
+        ])
         with tab_analyze:
             page_analyze()
         with tab_pipeline:
@@ -1116,6 +2535,12 @@ def main():
             page_review()
         with tab_fixqa:
             page_fixer_qa()
+        with tab_audit:
+            page_fixer_audit()
+        with tab_constraints:
+            page_constraints_generator()
+        with tab_telemetry:
+            page_telemetry()
 
 
 if __name__ == "__main__":

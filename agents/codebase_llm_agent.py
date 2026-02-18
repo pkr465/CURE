@@ -370,6 +370,23 @@ class CodebaseLLMAgent:
         else:
             logger.info("[*] Skipping email report: No recipients configured.")
 
+        # --- 6. CCLS Artifact Cleanup ---
+        if self.use_ccls:
+            try:
+                from dependency_builder.cleanup import cleanup_ccls_artifacts
+                logger.info("[*] Cleaning up CCLS artifacts...")
+                cleanup_stats = cleanup_ccls_artifacts(
+                    output_dir=self.output_dir,
+                    project_root=str(self.codebase_path),
+                )
+                mb = cleanup_stats["bytes_freed"] / (1024 * 1024)
+                logger.info(
+                    f"[*] CCLS cleanup: {cleanup_stats['files_removed']} files, "
+                    f"{cleanup_stats['dirs_removed']} dirs removed ({mb:.1f} MB freed)"
+                )
+            except Exception as e:
+                logger.warning(f"[!] CCLS cleanup failed: {e}")
+
         return excel_path
 
     def _analyze_single_file(self, file_path: Path, rel_path: str):
@@ -540,11 +557,11 @@ class CodebaseLLMAgent:
                 for item in data[:10]: # Limit to top 10 to save tokens
                     if isinstance(item, dict):
                         name = item.get("name", "Unknown")
-                        kind = item.get("kind", "Unknown")
-                        snippet = item.get("snippet", "").strip()
+                        # "definition" is the key returned by CCLSDependencyBuilder
+                        snippet = (item.get("definition") or item.get("snippet") or "").strip()
                         file_src = item.get("file", "")
                         if snippet:
-                            context_str.append(f"// ({kind}) {name} from {file_src}:\n{snippet}")
+                            context_str.append(f"// {name} from {file_src}:\n{snippet}")
 
             return "\n\n".join(context_str)
 
@@ -736,6 +753,75 @@ class CodebaseLLMAgent:
                     "rationale": item.get("Suggestion")
                 }
                 f.write(json.dumps(agent_metric) + '\n')
+
+    def _write_vector_ndjson(self, output_path: str) -> str:
+        """Write LLM analysis results as vector-DB-ready NDJSON.
+
+        Transforms ``self.results`` into records whose field names align with
+        the default ``vector_db_fields`` and ``metadata_fields`` used by
+        :class:`db.ndjson_processor.NDJSONProcessor`, so the existing
+        ``VectorDbPipeline`` can ingest them without any configuration changes.
+
+        Args:
+            output_path: Destination file path for the NDJSON output.
+
+        Returns:
+            The *output_path* that was written to.
+        """
+        out_dir = os.path.dirname(output_path)
+        if out_dir:
+            os.makedirs(out_dir, exist_ok=True)
+
+        logger = logging.getLogger(__name__)
+        written = 0
+
+        with open(output_path, "w", encoding="utf-8") as fh:
+            for idx, item in enumerate(self.results):
+                file_path = item.get("File", "")
+                line_num = int(item.get("Line", 0) or 0)
+                # Build a content-based ID so re-runs with different ordering
+                # produce the same UUID for the same finding (dedup-safe).
+                stable_id = (
+                    f"llm_finding::{file_path}::{line_num}"
+                    f"::{item.get('Category', '')}::{item.get('Title', '')}"
+                )
+                record = {
+                    # ── Identity / UUID keys ─────────────────────────────
+                    "record_type": "llm_review_finding",
+                    "id": stable_id,
+                    "source": "llm_code_review",
+
+                    # ── Text fields → page_content ───────────────────────
+                    "title": item.get("Title", ""),
+                    "description": item.get("Description", ""),
+                    "recommendation": item.get("Suggestion", ""),
+                    "details": item.get("Code", ""),
+                    "notes": item.get("Fixed_Code", ""),
+                    "summary": item.get("Category", ""),
+
+                    # ── Metadata fields ──────────────────────────────────
+                    "severity": item.get("Severity", ""),
+                    "category": item.get("Category", ""),
+                    "status": item.get("Confidence", ""),
+                    "file_relative_path": file_path,
+                    "file_name": os.path.basename(file_path) if file_path else "",
+                    "module": os.path.dirname(file_path) if file_path else "",
+                    "line": line_num,
+
+                    # ── Traceability ─────────────────────────────────────
+                    "name": item.get("Title", ""),
+                    "violation_type": item.get("Category", ""),
+                    "violation_message": item.get("Description", ""),
+                    "message": item.get("Suggestion", ""),
+                }
+                fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+                written += 1
+
+        logger.info(
+            "Wrote %d LLM review records to vector-ready NDJSON: %s",
+            written, output_path,
+        )
+        return output_path
 
     def _generate_excel_report(
         self, output_path: str, adapter_results: Optional[Dict] = None

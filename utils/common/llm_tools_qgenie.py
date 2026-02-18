@@ -479,11 +479,9 @@ class LLMTools:
         """
         system_prompt = self._intent_prompt_builder(user_input_prompt)
 
-        raw_response = self.llm_call(
-            prompt=system_prompt,
-            max_tokens=self.config.intent_max_tokens,
-            temperature=self.config.intent_temperature,
-        )
+        # Note: llm_call() only accepts (prompt, model) — intent-specific
+        # max_tokens / temperature are handled by the provider config.
+        raw_response = self.llm_call(prompt=system_prompt)
 
         json_str = self.extract_json_from_llm_response(raw_response)
 

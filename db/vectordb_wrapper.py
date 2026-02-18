@@ -38,7 +38,7 @@ class VectorDB:
                 self.env_config.get("POSTGRES_CONNECTION"),
                 self.env_config.get("POSTGRES_COLLECTION"),
                 self.env_config.get("POSTGRES_EMBEDDING_TABLENAME"),
-                self.env_config.get("POSTGRES_COLLECTION_EMBEDDING_TABLENAME"),
+                self.env_config.get("POSTGRES_COLLECTION_TABLENAME"),
                 self.env_config.get("QGENIE_API_KEY")
             )
             return pg_vector_store

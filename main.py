@@ -1008,6 +1008,26 @@ def run_workflow(user_input: str, env_config: EnvConfig, global_config: Optional
                 f"  🗄️  Documents Ingested: {final_state['ingested_document_count']}"
             )
 
+    # ── CCLS artifact cleanup ────────────────────────────────────────────
+    _opts = state.get("opts", {})
+    if _opts.get("use_ccls", False):
+        try:
+            from dependency_builder.cleanup import cleanup_ccls_artifacts
+            out_dir = state.get("out_dir", "./out")
+            src_dir = state.get("codebase_path", "")
+            console.print("\n[blue]🧹 Cleaning up CCLS artifacts...[/blue]")
+            cleanup_stats = cleanup_ccls_artifacts(
+                output_dir=out_dir,
+                project_root=src_dir,
+            )
+            mb = cleanup_stats["bytes_freed"] / (1024 * 1024)
+            console.print(
+                f"[green]  ✅ Removed {cleanup_stats['files_removed']} files, "
+                f"{cleanup_stats['dirs_removed']} dirs ({mb:.1f} MB freed)[/green]"
+            )
+        except Exception as e:
+            console.print(f"[yellow]  ⚠️  CCLS cleanup failed: {e}[/yellow]")
+
     force_garbage_collection()
     return final_state
 
@@ -1235,7 +1255,10 @@ def main():
                 sys.exit(1)
 
             console.print(f"[bold blue]🚀 Starting Exclusive LLM Analysis on: {codebase_path}[/bold blue]")
-            console.print("[blue]ℹ️  (Bypassing Health Report & Vector DB Workflow)[/blue]")
+            if opts.get("enable_vector_db"):
+                console.print("[blue]ℹ️  (Bypassing Health Report — LLM results will be ingested into Vector DB)[/blue]")
+            else:
+                console.print("[blue]ℹ️  (Bypassing Health Report & Vector DB Workflow)[/blue]")
 
             try:
                 # Build shared LLM tools from config/CLI args
@@ -1312,6 +1335,23 @@ def main():
 
                 console.print(f"[green]✅ LLM Analysis Complete![/green]")
                 console.print(f"[green]📊 Detailed Report Saved: {report_path}[/green]")
+
+                # ── Vector DB ingestion (optional) ────────────────────────
+                if opts.get("enable_vector_db") and getattr(agent, "results", None):
+                    try:
+                        parseddata_dir = os.path.join(opts["out_dir"], "parseddata")
+                        os.makedirs(parseddata_dir, exist_ok=True)
+                        ndjson_out = os.path.join(parseddata_dir, "llm_review_vector.ndjson")
+                        agent._write_vector_ndjson(ndjson_out)
+                        console.print(f"[green]✓ Vector-ready NDJSON: {ndjson_out}[/green]")
+
+                        from db.vectordb_pipeline import VectorDbPipeline
+                        env_cfg = global_config if global_config else EnvConfig()
+                        pipeline = VectorDbPipeline(environment=env_cfg)
+                        pipeline.run()
+                        console.print("[green]✓ Vector DB ingestion complete — chat is now available[/green]")
+                    except Exception as vec_err:
+                        console.print(f"[yellow]⚠ Vector DB ingestion skipped: {vec_err}[/yellow]")
 
                 sys.exit(0)
 

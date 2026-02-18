@@ -10,6 +10,8 @@ Author: Pavan R
 import os
 import platform
 import socket
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
@@ -346,6 +348,38 @@ def sidebar(logo_path: str) -> str:
         # Feedback toggle
         feedback_on = feedback_toggle_sidebar()
         st.session_state["feedback_mode"] = feedback_on
+
+        # ── Configuration toggles ────────────────────────────────────
+        st.markdown(
+            "<hr style='margin-top: 4px; margin-bottom: 10px;'>",
+            unsafe_allow_html=True,
+        )
+        st.markdown("### Configuration")
+
+        # HITL toggle
+        if "enable_hitl" not in st.session_state:
+            st.session_state["enable_hitl"] = False
+        hitl_on = st.toggle(
+            "Enable HITL",
+            value=st.session_state.get("enable_hitl", False),
+            help="Enable Human-in-the-Loop feedback pipeline (requires PostgreSQL)",
+        )
+        st.session_state["enable_hitl"] = hitl_on
+
+        # Telemetry toggle
+        if "enable_telemetry" not in st.session_state:
+            st.session_state["enable_telemetry"] = True
+        telemetry_on = st.toggle(
+            "Telemetry",
+            value=st.session_state.get("enable_telemetry", True),
+            help="Silent usage tracking — issues found/fixed, LLM usage, run durations",
+        )
+        st.session_state["enable_telemetry"] = telemetry_on
+
+        st.markdown(
+            "<hr style='margin-top: 4px; margin-bottom: 10px;'>",
+            unsafe_allow_html=True,
+        )
 
         # Version badge
         st.markdown(
@@ -698,6 +732,73 @@ def _list_directory(path: str) -> Tuple[List[str], List[str]]:
     return dirs, files
 
 
+def _open_native_folder_dialog(initial_dir: str = "", title: str = "Select Folder") -> str:
+    """
+    Open the native OS folder picker (Finder / Explorer / GTK dialog).
+
+    Runs tkinter in a subprocess to avoid threading conflicts with Streamlit.
+    Returns the selected path, or empty string if cancelled.
+    """
+    if not initial_dir or not os.path.isdir(initial_dir):
+        initial_dir = str(Path.home())
+
+    script = (
+        "import tkinter as tk; "
+        "from tkinter import filedialog; "
+        "root = tk.Tk(); "
+        "root.withdraw(); "
+        "root.attributes('-topmost', True); "
+        f"path = filedialog.askdirectory(initialdir={initial_dir!r}, title={title!r}); "
+        "print(path if path else '')"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=120,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
+def _open_native_file_dialog(
+    initial_dir: str = "",
+    title: str = "Select File",
+    filetypes: Optional[List[Tuple[str, str]]] = None,
+) -> str:
+    """
+    Open the native OS file picker (Finder / Explorer / GTK dialog).
+
+    Runs tkinter in a subprocess to avoid threading conflicts with Streamlit.
+    Returns the selected file path, or empty string if cancelled.
+    """
+    if not initial_dir or not os.path.isdir(initial_dir):
+        initial_dir = str(Path.home())
+
+    if filetypes:
+        ft_str = repr(filetypes)
+    else:
+        ft_str = repr([("All files", "*.*")])
+
+    script = (
+        "import tkinter as tk; "
+        "from tkinter import filedialog; "
+        "root = tk.Tk(); "
+        "root.withdraw(); "
+        "root.attributes('-topmost', True); "
+        f"path = filedialog.askopenfilename(initialdir={initial_dir!r}, title={title!r}, filetypes={ft_str}); "
+        "print(path if path else '')"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=120,
+        )
+        return result.stdout.strip()
+    except Exception:
+        return ""
+
+
 def folder_browser(
     label: str = "Browse",
     default_path: str = "",
@@ -707,22 +808,21 @@ def folder_browser(
     help_text: str = "",
 ) -> str:
     """
-    Renders an interactive folder/file browser inside the Streamlit UI.
+    Renders a folder/file path input with a Browse button that opens the
+    **native OS file dialog** (Finder on macOS, Explorer on Windows,
+    GTK dialog on Linux).
 
-    Works on Windows, macOS, and Linux.  The user can:
-    - Type / paste a path directly
-    - Click 📂 Browse to open an in-page navigator
-    - Navigate into sub-folders recursively
-    - Go up to the parent directory
-    - Select a folder (or file) and confirm
+    Falls back to the in-page browser if the native dialog is unavailable
+    (e.g. headless server, missing tkinter).
 
     Args:
         label: Display label for the text input.
         default_path: Initial value shown in the text input.
         key: Unique Streamlit widget key prefix.
-        show_files: Whether to list files alongside directories.
-        file_extensions: If set, only show files matching these extensions
-                        (e.g. [".c", ".cpp", ".h"]).
+        show_files: If True and file_extensions is set, opens a native
+                    file picker instead of a folder picker.
+        file_extensions: If set, opens a file picker filtered to these
+                        extensions (e.g. [".c", ".cpp", ".h"]).
         help_text: Tooltip / help string for the text input.
 
     Returns:
@@ -730,6 +830,7 @@ def folder_browser(
     """
 
     # ── Session state keys ────────────────────────────────────────────────
+    result_key = f"{key}_native_result"
     browse_key = f"{key}_browsing"
     nav_key = f"{key}_nav_path"
 
@@ -738,27 +839,56 @@ def folder_browser(
     if nav_key not in st.session_state:
         st.session_state[nav_key] = ""
 
+    # Use the native result if one was just picked
+    effective_default = default_path
+    if result_key in st.session_state and st.session_state[result_key]:
+        effective_default = st.session_state[result_key]
+
     # ── Text input + Browse button side by side ───────────────────────────
     col_input, col_btn = st.columns([5, 1])
     with col_input:
         typed_path = st.text_input(
             label,
-            value=default_path,
+            value=effective_default,
             key=f"{key}_text",
             help=help_text or "Type a path or click Browse to navigate.",
         )
     with col_btn:
         st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
         if st.button("📂 Browse", key=f"{key}_btn"):
-            # Initialise starting directory
             start = typed_path.strip() if typed_path.strip() else str(Path.home())
             if not os.path.isdir(start):
-                start = str(Path.home())
-            st.session_state[nav_key] = start
-            st.session_state[browse_key] = True
-            st.rerun()
+                start = os.path.dirname(start) if os.path.exists(os.path.dirname(start)) else str(Path.home())
 
-    # ── Browser panel ─────────────────────────────────────────────────────
+            # Decide: file picker vs folder picker
+            picked = ""
+            if show_files and file_extensions:
+                # Build filetypes for native dialog
+                ext_patterns = " ".join(f"*{e}" for e in file_extensions)
+                filetypes = [("Matching files", ext_patterns), ("All files", "*.*")]
+                picked = _open_native_file_dialog(
+                    initial_dir=start,
+                    title=f"Select File — {label}",
+                    filetypes=filetypes,
+                )
+            else:
+                picked = _open_native_folder_dialog(
+                    initial_dir=start,
+                    title=f"Select Folder — {label}",
+                )
+
+            if picked:
+                # Native dialog succeeded
+                st.session_state[result_key] = picked
+                st.session_state[browse_key] = False
+                st.rerun()
+            else:
+                # Fallback: open in-page browser (dialog was cancelled or unavailable)
+                st.session_state[nav_key] = start
+                st.session_state[browse_key] = True
+                st.rerun()
+
+    # ── In-page fallback browser panel ────────────────────────────────────
     if st.session_state[browse_key]:
         current = st.session_state[nav_key]
 
@@ -808,6 +938,7 @@ def folder_browser(
 
             with root_cols[3]:
                 if st.button("✅ Select", key=f"{key}_select", type="primary"):
+                    st.session_state[result_key] = current
                     st.session_state[browse_key] = False
                     st.rerun()
 
@@ -856,5 +987,11 @@ def folder_browser(
 
         # Return the navigated path when browsing
         return current
+
+    # Clear the native result after it's been consumed by the text input
+    if result_key in st.session_state and st.session_state[result_key]:
+        picked_val = st.session_state[result_key]
+        st.session_state[result_key] = ""
+        return picked_val
 
     return typed_path

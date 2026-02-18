@@ -1,6 +1,5 @@
 import json
 from utils.common.llm_tools import LLMTools
-from itertools import chain
 import logging
 import sys
 import re
@@ -32,8 +31,33 @@ class CodebaseAnalysisSessionState:
         self.vectordb_query = None
 
 class CodebaseAnalysisOrchestration:
-    def __init__(self):
-        self.tools = LLMTools()
+    def __init__(self, vectordb=None):
+        """
+        Initialize the orchestration with optional vectordb.
+
+        Args:
+            vectordb: Optional VectorDB instance. If None, attempts to
+                      initialize from GlobalConfig/EnvConfig automatically.
+        """
+        if vectordb is None:
+            vectordb = self._init_vectordb()
+        self.tools = LLMTools(vectordb=vectordb)
+
+    @staticmethod
+    def _init_vectordb():
+        """Attempt to initialize VectorDB from config. Returns None on failure."""
+        try:
+            from db.vectordb_wrapper import VectorDB
+            try:
+                from utils.parsers.global_config_parser import GlobalConfig
+                env_config = GlobalConfig()
+            except (ImportError, Exception):
+                from utils.parsers.env_parser import EnvConfig
+                env_config = EnvConfig()
+            return VectorDB(env_config)
+        except Exception as e:
+            logger.warning(f"Could not initialize VectorDB: {e}. Chat retrieval will be unavailable.")
+            return None
         
     def flatten_docs(self, retrieved_docs):
         """Always returns a flat list of doc objects, even if retrieved_docs is a list-of-lists."""

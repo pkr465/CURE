@@ -336,6 +336,9 @@ class HeaderContextBuilder:
             if resolved_path and resolved_path not in seen_paths:
                 seen_paths.add(resolved_path)
                 result.append(ri)
+                logger.debug(
+                    "  Resolved include: %s (%s) → %s", inc_name, inc_type, resolved_path
+                )
 
                 # Recurse into the resolved header
                 if _depth < self.max_header_depth:
@@ -347,8 +350,14 @@ class HeaderContextBuilder:
                             seen_paths.add(si.abs_path)
                             result.append(si)
             elif not resolved_path:
-                # Unresolved but still record it (might be useful for logging)
-                logger.debug("Unresolved include: %s in %s", inc_name, abs_path)
+                # Unresolved — log diagnostic info to help debug
+                logger.debug(
+                    "  Unresolved include: %s (%s) in %s "
+                    "(codebase_path=%s, file_dir=%s, include_paths=%s)",
+                    inc_name, inc_type, abs_path,
+                    self.codebase_path, file_dir,
+                    [str(p) for p in self.include_paths],
+                )
 
         self._include_cache[abs_path] = result
         return result
@@ -356,15 +365,28 @@ class HeaderContextBuilder:
     def _resolve_include_path(
         self, inc_name: str, inc_type: str, file_dir: Path
     ) -> Optional[str]:
-        """Try to find the actual file for an include directive."""
+        """Try to find the actual file for an include directive.
+
+        For both local ("") and system (<>) includes, we search the
+        codebase root and common include subdirectories.  Many embedded
+        C projects use angle brackets for project-local headers, so we
+        must not restrict system-style includes to only ``include_paths``.
+        """
         search_dirs: List[Path] = []
 
         if inc_type == "local":
-            # Local includes: same dir first, then include paths, then codebase root
+            # Local includes: same dir → include_paths → codebase root
             search_dirs = [file_dir] + self.include_paths + [self.codebase_path]
         else:
-            # System includes: only include paths (project-level system dirs)
-            search_dirs = list(self.include_paths)
+            # System includes: include_paths → codebase root → file dir
+            # (many projects use <> for project headers)
+            search_dirs = list(self.include_paths) + [self.codebase_path, file_dir]
+
+        # Also add common project include subdirectories
+        for subdir in ("include", "inc", "src", "common", "api", "hdr"):
+            candidate_dir = self.codebase_path / subdir
+            if candidate_dir.is_dir() and candidate_dir not in search_dirs:
+                search_dirs.append(candidate_dir)
 
         for search_dir in search_dirs:
             candidate = search_dir / inc_name
@@ -372,22 +394,26 @@ class HeaderContextBuilder:
                 return str(candidate.resolve())
 
         # Fallback: recursive search under codebase_path for the basename
-        # (handles cases like #include "subdir/header.h" when cwd is wrong)
+        # (handles cases like #include "subdir/header.h" when cwd is wrong,
+        #  or headers in deeply nested project directories)
         basename = os.path.basename(inc_name)
         for root, _dirs, files in os.walk(self.codebase_path):
             if basename in files:
                 candidate = Path(root) / basename
                 # Verify the relative path matches if inc_name has directories
                 if "/" in inc_name or "\\" in inc_name:
-                    candidate_rel = candidate.relative_to(self.codebase_path).as_posix()
-                    if candidate_rel.endswith(inc_name.replace("\\", "/")):
-                        return str(candidate.resolve())
+                    try:
+                        candidate_rel = candidate.relative_to(self.codebase_path).as_posix()
+                        if candidate_rel.endswith(inc_name.replace("\\", "/")):
+                            return str(candidate.resolve())
+                    except ValueError:
+                        pass
                 else:
                     return str(candidate.resolve())
             # Don't recurse into excluded dirs
             _dirs[:] = [d for d in _dirs if d not in {
                 ".git", "build", "dist", "third_party", "external",
-                "vendor", ".ccls-cache", "__pycache__", "out", "bin", "obj",
+                "vendor", ".ccls-cache", "__pycache__", "bin", "obj",
             }]
 
         return None

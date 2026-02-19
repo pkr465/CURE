@@ -193,7 +193,11 @@ class CodebaseLLMAgent:
                         max_context_chars=int(context_cfg.get("max_context_chars", 6000)),
                         exclude_system_headers=context_cfg.get("exclude_system_headers", True),
                     )
-                    logger.info("[*] Header Context Builder ENABLED for context-aware analysis.")
+                    logger.info(
+                        f"[*] Header Context Builder ENABLED "
+                        f"(codebase_path={self.codebase_path}, "
+                        f"include_paths={inc_paths})"
+                    )
                 except Exception as hcb_err:
                     logger.warning(f"Failed to initialize HeaderContextBuilder: {hcb_err}")
             else:

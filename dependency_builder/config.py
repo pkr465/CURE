@@ -30,6 +30,7 @@ class DependencyBuilderConfig:
     # --- LSP Settings ---
     lsp_endpoint_timeout: int = 30
     lsp_initialization_delay: float = 0.5
+    ccls_lsp_init_delay: float = 2.0  # Seconds to wait after LSP init for CCLS to load index
     index_threads: Optional[int] = None  # None = use os.cpu_count()
 
     # --- Indexing ---

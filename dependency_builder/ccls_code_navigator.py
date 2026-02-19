@@ -1,5 +1,6 @@
 import subprocess
 import os
+import select
 import signal
 import time
 import math
@@ -165,7 +166,10 @@ class CCLSCodeNavigator:
                 "client": {"snippetSupport": False}
             }
             
-            self.logger.info("Sending LSP initialize request...")
+            self.logger.info(
+                f"Sending LSP initialize request... "
+                f"(root={self.project_root}, cache={self.cache_path})"
+            )
             self.lsp_client.initialize(
                 processId=self.ccls_process.pid,
                 rootPath=self.project_root,
@@ -175,7 +179,8 @@ class CCLSCodeNavigator:
                 workspaceFolders=[{"uri": root_uri, "name": Path(self.project_root).name}],
                 trace="off"
             )
-            time.sleep(0.5)
+            # Give CCLS time to load index from cache. Larger projects need more time.
+            time.sleep(self.config.ccls_lsp_init_delay if hasattr(self.config, 'ccls_lsp_init_delay') else 2.0)
         except Exception as e:
             self.logger.exception(f"Failed to initialize LSP session: {e}")
             raise
@@ -276,9 +281,31 @@ class CCLSCodeNavigator:
                 self.opened_docs.add(doc.uri)
 
                 # Wait for CCLS to become ready for this document.
-                # A fresh CCLS process needs time to load the index cache.
-                max_retries = 6
+                # A fresh CCLS process needs time to load the index cache from disk.
+                # Larger codebases need more time — use progressive backoff.
+                max_retries = 15
+                wait_seconds = 1.0
+                self.logger.debug(
+                    f"Waiting for CCLS readiness: {doc.uri} "
+                    f"(cache: {self.cache_path})"
+                )
                 for attempt in range(max_retries):
+                    # Check if ccls process is still alive
+                    if self.ccls_process and self.ccls_process.poll() is not None:
+                        rc = self.ccls_process.returncode
+                        stderr_out = ""
+                        try:
+                            stderr_out = self.ccls_process.stderr.read().decode(
+                                "utf-8", errors="replace"
+                            )[:500]
+                        except Exception:
+                            pass
+                        self.logger.error(
+                            f"CCLS process exited prematurely (rc={rc}). "
+                            f"stderr: {stderr_out or '(empty)'}"
+                        )
+                        break
+
                     try:
                         syms = self.lsp_client.lsp_endpoint.call_method(
                             "textDocument/documentSymbol", textDocument=doc
@@ -289,13 +316,41 @@ class CCLSCodeNavigator:
                                 f"({len(syms)} symbols)"
                             )
                             break
+                        elif syms is not None:
+                            # Empty list returned — CCLS responded but file has
+                            # no top-level symbols (e.g. a header with only macros).
+                            # This still means CCLS is loaded and responsive.
+                            self.logger.debug(
+                                f"CCLS responded for {doc.uri} after {attempt + 1} attempt(s) "
+                                f"(0 symbols — file may contain only macros/typedefs)"
+                            )
+                            break
+                    except Exception as poll_err:
+                        if attempt == 0:
+                            self.logger.debug(
+                                f"CCLS not yet ready (attempt {attempt + 1}): {poll_err}"
+                            )
+                    time.sleep(wait_seconds)
+                    # Progressive backoff: 1s, 1s, 1.5s, 1.5s, 2s, ...
+                    if attempt > 0 and attempt % 2 == 0:
+                        wait_seconds = min(wait_seconds + 0.5, 3.0)
+                else:
+                    # Read stderr for diagnostic info
+                    stderr_snippet = ""
+                    try:
+                        if self.ccls_process and self.ccls_process.stderr:
+                            if select.select([self.ccls_process.stderr], [], [], 0.1)[0]:
+                                stderr_snippet = self.ccls_process.stderr.read(1024).decode(
+                                    "utf-8", errors="replace"
+                                )
                     except Exception:
                         pass
-                    time.sleep(1.0)
-                else:
                     self.logger.warning(
                         f"CCLS may not be fully ready for {doc.uri} "
-                        f"(no symbols after {max_retries} attempts)"
+                        f"(no symbols after {max_retries} attempts, "
+                        f"~{sum(1.0 + 0.5 * (i // 2) for i in range(max_retries)):.0f}s waited). "
+                        f"Cache path: {self.cache_path}"
+                        + (f" stderr: {stderr_snippet}" if stderr_snippet else "")
                     )
         except Exception as e:
             self.logger.error(f"Failed to open document {doc.uri}: {e}")

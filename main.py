@@ -1219,6 +1219,26 @@ def main():
         if not os.path.exists(opts["out_dir"]):
             os.makedirs(opts["out_dir"], exist_ok=True)
 
+        # ── Setup debug.log file handler ─────────────────────────────────
+        # Always write DEBUG-level messages to {out_dir}/debug.log so the user
+        # can inspect CCLS context, prompt dumps, and other diagnostics even
+        # when the console is at INFO or WARNING level.
+        _debug_log_path = os.path.join(opts["out_dir"], "debug.log")
+        _debug_fh = logging.FileHandler(_debug_log_path, mode="w", encoding="utf-8")
+        _debug_fh.setLevel(logging.DEBUG)
+        _debug_fh.setFormatter(logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        ))
+        logging.getLogger().addHandler(_debug_fh)
+        # Ensure root logger accepts DEBUG so the file handler receives everything
+        if logging.getLogger().level > logging.DEBUG:
+            # Keep console handler at its current level; only root needs DEBUG
+            for _h in logging.getLogger().handlers:
+                if isinstance(_h, logging.StreamHandler) and not isinstance(_h, logging.FileHandler):
+                    _h.setLevel(logging.getLogger().level)
+            logging.getLogger().setLevel(logging.DEBUG)
+        console.print(f"[dim]Debug log: {_debug_log_path}[/dim]")
+
         # ----------------------------------------------------
         # PATCH ANALYSIS MODE
         # ----------------------------------------------------

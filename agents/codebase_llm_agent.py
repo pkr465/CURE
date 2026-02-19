@@ -341,7 +341,12 @@ class CodebaseLLMAgent:
                     output_dir=self.output_dir,
                     unique_project_prefix=self.project_name
                 )
-                if not self.is_indexed:
+                if self.is_indexed:
+                    logger.info(
+                        f"[*] CCLS Ingestion SUCCESS — cache at: "
+                        f"{os.path.join(os.path.abspath(self.output_dir), '.ccls-cache')}"
+                    )
+                else:
                     logger.warning(
                         "[!] Warning: Ingestion failed or timed out. "
                         "Analysis will proceed without semantic context."
@@ -349,6 +354,11 @@ class CodebaseLLMAgent:
             except Exception as e:
                 logger.error(f"[!] Critical Error during CCLS Ingestion: {e}")
                 self.is_indexed = False
+        elif self.use_ccls and not self.ingestion:
+            logger.warning(
+                "[!] CCLS requested but ingestion service is None "
+                "(dependency_builder not installed?). No CCLS context will be available."
+            )
 
         # --- 2. Gather Files ---
         files = self._gather_files()
@@ -467,6 +477,13 @@ class CodebaseLLMAgent:
                 if self.use_ccls and self.is_indexed and self.dep_service:
                     dependency_context = self._fetch_chunk_dependencies(
                         rel_path, start_line, end_line
+                    )
+                elif self.use_ccls:
+                    # Log why CCLS context was skipped despite being requested
+                    logger.debug(
+                        f"    CCLS skipped for {rel_path}: "
+                        f"is_indexed={self.is_indexed}, "
+                        f"dep_service={'yes' if self.dep_service else 'None'}"
                     )
 
                 # 2b. Header Context (struct/enum/macro definitions from included headers)
@@ -604,6 +621,12 @@ class CodebaseLLMAgent:
         used within the specified line range.
         """
         try:
+            logger.debug(
+                f"    CCLS fetch: {rel_path} lines {start_line}-{end_line} "
+                f"(use_ccls={self.use_ccls}, is_indexed={self.is_indexed}, "
+                f"dep_service={'yes' if self.dep_service else 'None'})"
+            )
+
             # Use 'fetch_dependencies_by_file' to get context for the range
             response = self.dep_service.perform_fetch(
                 project_root=str(self.codebase_path),
@@ -616,7 +639,12 @@ class CodebaseLLMAgent:
                 level=1
             )
 
+            msg = response.get("message", "")
             data = response.get("data", [])
+            logger.debug(
+                f"    CCLS response: msg='{msg}', data_items={len(data) if isinstance(data, list) else type(data).__name__}"
+            )
+
             if not data:
                 return ""
 
@@ -632,7 +660,12 @@ class CodebaseLLMAgent:
                         if snippet:
                             context_str.append(f"// {name} from {file_src}:\n{snippet}")
 
-            return "\n\n".join(context_str)
+            result = "\n\n".join(context_str)
+            if result:
+                logger.debug(f"    CCLS context: {len(context_str)} definitions, {len(result)} chars")
+            else:
+                logger.debug(f"    CCLS context: empty (data had {len(data)} items but no usable definitions)")
+            return result
 
         except Exception as e:
             logger.warning(f"[!] Warning: Dependency fetch failed for {rel_path}: {e}")

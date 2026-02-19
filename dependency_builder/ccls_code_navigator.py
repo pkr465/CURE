@@ -264,11 +264,39 @@ class CCLSCodeNavigator:
             return None
 
     def openDoc(self, doc: TextDocumentItem) -> None:
-        """Sends textDocument/didOpen if not already opened."""
+        """Sends textDocument/didOpen if not already opened.
+
+        After opening, waits for CCLS to finish loading/indexing the file
+        by polling documentSymbol until it returns a non-empty result or
+        the retry budget is exhausted.
+        """
         try:
             if doc.uri not in self.opened_docs:
                 self.lsp_client.didOpen(doc)
                 self.opened_docs.add(doc.uri)
+
+                # Wait for CCLS to become ready for this document.
+                # A fresh CCLS process needs time to load the index cache.
+                max_retries = 6
+                for attempt in range(max_retries):
+                    try:
+                        syms = self.lsp_client.lsp_endpoint.call_method(
+                            "textDocument/documentSymbol", textDocument=doc
+                        )
+                        if syms:
+                            self.logger.debug(
+                                f"CCLS ready for {doc.uri} after {attempt + 1} attempt(s) "
+                                f"({len(syms)} symbols)"
+                            )
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
+                else:
+                    self.logger.warning(
+                        f"CCLS may not be fully ready for {doc.uri} "
+                        f"(no symbols after {max_retries} attempts)"
+                    )
         except Exception as e:
             self.logger.error(f"Failed to open document {doc.uri}: {e}")
 

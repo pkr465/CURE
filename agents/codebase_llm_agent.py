@@ -449,9 +449,19 @@ class CodebaseLLMAgent:
                 try:
                     file_includes = self.header_context_builder.resolve_includes(str(file_path))
                     if file_includes:
-                        logger.debug(f"    Resolved {len(file_includes)} header include(s) for {rel_path}")
+                        resolved = [inc for inc in file_includes if inc.resolved]
+                        logger.debug(
+                            f"    Header includes for {rel_path}: "
+                            f"{len(file_includes)} total, {len(resolved)} resolved"
+                        )
+                        for inc in resolved[:5]:
+                            logger.debug(f"      ✓ {inc.name} → {inc.abs_path}")
+                    else:
+                        logger.debug(f"    No #include directives found in {rel_path}")
                 except Exception as hdr_err:
                     logger.debug(f"    Header resolution failed for {rel_path}: {hdr_err}")
+            else:
+                logger.debug(f"    HeaderContextBuilder not available (builder=None)")
 
             # 1. Physical Chunking (Brace Counting)
             chunks = self._smart_chunk_code(code_content)
@@ -493,8 +503,20 @@ class CodebaseLLMAgent:
                         header_context = self.header_context_builder.build_context_for_chunk(
                             chunk_text, file_includes
                         )
+                        if header_context:
+                            logger.debug(
+                                f"    Header context for chunk {chunk_idx+1}: "
+                                f"{len(header_context)} chars injected"
+                            )
+                        else:
+                            logger.debug(
+                                f"    Header context for chunk {chunk_idx+1}: "
+                                f"empty (no referenced definitions found in {len(file_includes)} headers)"
+                            )
                     except Exception as hctx_err:
                         logger.debug(f"    Header context build failed: {hctx_err}")
+                elif self.header_context_builder and not file_includes:
+                    logger.debug(f"    Header context skipped: no resolved includes for {rel_path}")
 
                 # 3. Context Construction (Previous Chunk Tail + Dependencies + Header Defs)
                 context_header = ""

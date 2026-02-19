@@ -45,6 +45,19 @@ class DependencyService:
             )
             return False, {"message": msg, "data": {}}
 
+        # Verify cache has actual content (not just an empty directory)
+        cache_files = list(Path(path_to_check).rglob("*"))
+        if not cache_files:
+            msg = (
+                f"CCLS cache directory exists but is empty for '{unique_project_prefix}'. "
+                f"Indexing may have failed silently. Path: {path_to_check}"
+            )
+            logger.warning(msg)
+            return False, {"message": msg, "data": {}}
+
+        logger.debug(
+            f"CCLS cache verified: {path_to_check} ({len(cache_files)} files)"
+        )
         return True, None
 
     def _validate_inputs(

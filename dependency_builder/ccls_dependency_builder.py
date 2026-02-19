@@ -236,10 +236,18 @@ class CCLSDependencyBuilder:
         Used for analyzing specific chunks of code (e.g., in git diffs or LLM context).
         """
         abs_file_path = self._resolve_file_path(file_path)
+        self.logger.debug(
+            f"get_dependency_diff: file={file_path} -> abs={abs_file_path}, "
+            f"range={start}-{end}, cache={self.cache_path}"
+        )
 
         # FIX: Explicitly reject directories
         if os.path.isdir(abs_file_path):
             self.logger.warning(f"Skipping dependency diff on directory: {abs_file_path}")
+            return []
+
+        if not os.path.isfile(abs_file_path):
+            self.logger.warning(f"File does not exist: {abs_file_path}")
             return []
 
         nav = CCLSCodeNavigator(self.project_root, self.cache_path, self.logger)
@@ -248,46 +256,68 @@ class CCLSDependencyBuilder:
             if not doc:
                 self.logger.error(f"Could not open doc for diff: {abs_file_path}")
                 return []
-            
+
+            self.logger.debug(f"  LSP doc created: {doc.uri}")
             nav.openDoc(doc)
             content = nav.read_file(abs_file_path)
             lines = content.splitlines()
             if not lines:
+                self.logger.debug(f"  File is empty: {abs_file_path}")
                 return []
 
             end_idx = min(len(lines), int(end) + 1) if end != float("inf") else len(lines)
             diff_content = "\n".join(lines[start:end_idx])
-            
+            self.logger.debug(f"  Chunk: lines {start}-{end_idx} ({len(diff_content)} chars)")
+
             # Get tokens for the snippet
             tokens = nav.getTokens(diff_content, doc, Position(line=start, character=0))
+            self.logger.debug(
+                f"  Tokens extracted: {len(tokens)} unique identifiers"
+                f"{' (libclang index=' + ('OK' if nav.index else 'NONE') + ')' }"
+            )
+            if not tokens:
+                self.logger.debug(f"  No tokens found — returning empty")
+                return []
+
+            # Log first few token names for debugging
+            token_names = list(tokens.keys())[:10]
+            self.logger.debug(f"  Token sample: {token_names}")
 
             results = []
             seen_defs = set()
-            
+            def_failures = 0
+
             for token in tokens.values():
                 # Avoid duplicates
                 if token["name"] in seen_defs:
                     continue
-                
+
                 # Resolve token definition
                 try:
                     ddoc, dpos, _ = nav.getDefinitionFromToken(
-                        doc, 
+                        doc,
                         Position(line=token["line"], character=token.get("character", 0))
                     )
-                except Exception:
+                except Exception as tok_err:
+                    def_failures += 1
                     continue
-                
+
                 if ddoc and dpos:
                     seen_defs.add(token["name"])
-                    
+
                     # Fetch dependencies for this token's definition
                     deps = self._fetch_dependencies_for_symbol(nav, ddoc, dpos, level)
                     if deps:
                         results.append(deps)
-                        
+                else:
+                    def_failures += 1
+
+            self.logger.debug(
+                f"  Results: {len(results)} dependencies found, "
+                f"{len(seen_defs)} resolved, {def_failures} failed lookups"
+            )
             return results
-            
+
         except Exception as e:
             self.logger.exception(f"Error in get_dependency_diff: {e}")
             return []

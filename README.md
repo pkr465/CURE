@@ -392,8 +392,8 @@ Create a file (e.g., `agents/constraints/my_driver.c_constraints.md`) using this
 | `--llm-temperature F`           | LLM temperature (default: 0.1)                                            |
 | `--max-files N`                 | Max files to analyze (default: 2000)                                      |
 | `--batch-size N`                | Files per analysis batch (default: 25)                                    |
-| `--exclude-dirs D [D]`          | Directories to exclude from analysis                                      |
-| `--exclude-globs G [G]`         | Glob patterns to exclude (e.g., `*.test.cpp`)                             |
+| `--exclude-dirs D [D]`          | Directories to exclude (merged with `scanning.exclude_dirs` config)       |
+| `--exclude-globs G [G]`         | Glob patterns to exclude (merged with `scanning.exclude_globs` config)    |
 | `--enable-vector-db`            | Enable vector DB ingestion pipeline                                       |
 | `--vector-chunk-size N`         | Chunk size for vector embeddings (default: 4000)                          |
 | `--vector-overlap-size N`       | Overlap between chunks (default: 200)                                     |
@@ -554,6 +554,7 @@ The `global_config.yaml` file provides hierarchical, typed configuration with `$
 | `embeddings`         | Vector embedding model selection                      |
 | `database`           | PostgreSQL connection, PGVector collection settings   |
 | `email`              | SMTP report delivery configuration                    |
+| `scanning`           | File discovery exclusions — directory names and glob patterns to skip |
 | `dependency_builder` | CCLS executable, timeouts, BFS depth, connection pool |
 | `excel`              | Report styling (colors, column widths, freeze/filter) |
 | `mermaid`            | Diagram rendering configuration                       |
@@ -765,6 +766,58 @@ agents/context/
 ```
 
 Modified: `agents/codebase_llm_agent.py` (integration), `prompts/codebase_analysis_prompt.py` (9 context-aware rules), `global_config.yaml` (configuration).
+
+---
+
+## File Discovery Exclusions
+
+CURE provides flexible file exclusion controls via both `global_config.yaml` and CLI flags. Exclusions apply across the entire pipeline — file discovery, LLM analysis, CCLS indexing, header context resolution, and deep static adapters.
+
+### Configuration
+
+Add permanent exclusions in `global_config.yaml`:
+
+```yaml
+scanning:
+  # Directory names to skip during file discovery (matched by name, not path).
+  # These are added on top of the built-in defaults (.git, build, node_modules, etc.)
+  exclude_dirs:
+    - test
+    - third_party
+    - vendor
+
+  # Glob patterns to skip (matched against the relative path from codebase root).
+  # Patterns are case-insensitive and use fnmatch syntax.
+  exclude_globs:
+    - "*/test/*"
+    - "*/generated/*"
+    - "moc_*.cpp"
+    - "*_autogen/*"
+```
+
+Both options accept multiple entries as YAML lists. CLI flags `--exclude-dirs` and `--exclude-globs` are **merged** with these config values (not replaced), allowing you to define permanent exclusions in config while adding ad-hoc ones on the command line:
+
+```bash
+# Config defines exclude_dirs: [test, vendor]
+# CLI adds "docs" → final list: [test, vendor, docs]
+python main.py --llm-exclusive --codebase-path ./project --exclude-dirs docs
+```
+
+Duplicates are automatically removed. Config entries take precedence in ordering, followed by CLI additions.
+
+### Where Exclusions Apply
+
+| Component | `exclude_dirs` | `exclude_globs` |
+|:----------|:---------------|:----------------|
+| File discovery (`FileProcessor`) | Skips directories by name | Skips files matching glob against relative path |
+| `CodebaseLLMAgent` (`_gather_files`) | Skips directories by name | fnmatch filtering on relative paths |
+| `HeaderContextBuilder` (include resolution) | Skips directories during recursive header search | Skips resolved headers matching glob patterns |
+| `CCLSIngestion` (`.ccls` config) | Converted to `%ignore .*/<dir>/.*` regex patterns | Converted to `%ignore` regex patterns |
+| Streamlit UI | Text input field (comma-separated) | Text input field (comma-separated) |
+
+### Built-in Defaults
+
+The following directories are always excluded from file discovery, regardless of configuration: `.git`, `build`, `node_modules`, `.venv`, `__pycache__`, `dist`, `.ccls-cache`, `bin`, `obj`, and others. The `exclude_dirs` config and CLI options add to these built-in defaults.
 
 ---
 

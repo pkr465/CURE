@@ -131,6 +131,28 @@ database:
   vector_database: postgres # postgres | chroma | pinecone
 
 # ----------------------------------------------------------------------------
+# Scanning — File discovery exclusions
+# ----------------------------------------------------------------------------
+# Both options accept multiple entries as YAML lists.
+# CLI flags --exclude-dirs / --exclude-globs are MERGED with these (not replaced).
+scanning:
+  # Directory names to skip during file discovery (matched by name, not path).
+  # These are added on top of the built-in defaults (.git, build, node_modules, etc.)
+  exclude_dirs: []
+  #  - test
+  #  - third_party
+  #  - build
+  #  - vendor
+
+  # Glob patterns to skip (matched against the relative path from codebase root).
+  # Patterns are case-insensitive and use fnmatch syntax.
+  exclude_globs: []
+  #  - "*/test/*"
+  #  - "*/generated/*"
+  #  - "moc_*.cpp"
+  #  - "*_autogen/*"
+
+# ----------------------------------------------------------------------------
 # Logging & Debugging
 # ----------------------------------------------------------------------------
 logging:

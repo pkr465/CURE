@@ -124,6 +124,7 @@ _DEFAULTS = {
     "enable_adapters": False,
     "use_ccls": False,
     "exclude_dirs": "",
+    "exclude_globs": "",
     "file_to_fix": None,
     # Pipeline state
     "analysis_in_progress": False,
@@ -512,6 +513,12 @@ def page_analyze():
                     help="e.g., test,third_party,build",
                 )
                 st.session_state["exclude_dirs"] = exclude_dirs
+                exclude_globs = st.text_input(
+                    "Exclude Glob Patterns (comma-separated)",
+                    value="",
+                    help="e.g., */test/*, moc_*.cpp, *_autogen/*",
+                )
+                st.session_state["exclude_globs"] = exclude_globs
 
         output_dir = st_tools.folder_browser(
             label="Output Directory",
@@ -599,6 +606,11 @@ def page_analyze():
                 for d in st.session_state.get("exclude_dirs", "").split(",")
                 if d.strip()
             ]
+            exclude_globs = [
+                g.strip()
+                for g in st.session_state.get("exclude_globs", "").split(",")
+                if g.strip()
+            ]
             config = {
                 "codebase_path": st.session_state["codebase_path"],
                 "output_dir": st.session_state["output_dir"],
@@ -615,6 +627,7 @@ def page_analyze():
                 "max_files": st.session_state.get("max_files", 2000),
                 "batch_size": st.session_state.get("batch_size", 25),
                 "exclude_dirs": exclude,
+                "exclude_globs": exclude_globs,
                 "debug_mode": st.session_state.get("debug_mode", False),
                 "file_to_fix": st.session_state.get("file_to_fix"),
             }

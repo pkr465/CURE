@@ -15,3 +15,5 @@ out/
 # OS files
 .DS_Store
 ccls.log
+.DS_Store
+*.tmp

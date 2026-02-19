@@ -9,6 +9,7 @@ Works entirely via regex — no CCLS or external tooling required.
 Caches parsed headers for the lifetime of the builder instance.
 """
 
+import fnmatch
 import logging
 import os
 import re
@@ -249,6 +250,12 @@ class HeaderContextBuilder:
         context  = builder.build_context_for_chunk(chunk_text, includes)
     """
 
+    # Default directory names to skip during recursive header search
+    _DEFAULT_WALK_EXCLUDE = {
+        ".git", "build", "dist", "third_party", "external",
+        "vendor", ".ccls-cache", "__pycache__", "bin", "obj",
+    }
+
     def __init__(
         self,
         codebase_path: str,
@@ -257,6 +264,8 @@ class HeaderContextBuilder:
         max_context_chars: int = 6000,
         exclude_system_headers: bool = True,
         max_definitions_per_header: int = 500,
+        exclude_dirs: Optional[List[str]] = None,
+        exclude_globs: Optional[List[str]] = None,
     ):
         self.codebase_path = Path(codebase_path).resolve()
         self.include_paths: List[Path] = []
@@ -269,6 +278,10 @@ class HeaderContextBuilder:
         self.max_context_chars = max_context_chars
         self.exclude_system_headers = exclude_system_headers
         self.max_definitions_per_header = max_definitions_per_header
+
+        # Merge caller-supplied exclusions with defaults
+        self.exclude_dirs = self._DEFAULT_WALK_EXCLUDE | set(exclude_dirs or [])
+        self.exclude_globs = exclude_globs or []
 
         # Caches (persist for the lifetime of this builder instance)
         self._include_cache: Dict[str, List[ResolvedInclude]] = {}
@@ -398,8 +411,19 @@ class HeaderContextBuilder:
         #  or headers in deeply nested project directories)
         basename = os.path.basename(inc_name)
         for root, _dirs, files in os.walk(self.codebase_path):
+            # Apply directory-name exclusions
+            _dirs[:] = [d for d in _dirs if d not in self.exclude_dirs]
+
             if basename in files:
                 candidate = Path(root) / basename
+                # Apply glob exclusions on the candidate
+                if self.exclude_globs:
+                    try:
+                        rel = candidate.relative_to(self.codebase_path).as_posix().lower()
+                        if any(fnmatch.fnmatch(rel, g.lower()) for g in self.exclude_globs):
+                            continue
+                    except ValueError:
+                        pass
                 # Verify the relative path matches if inc_name has directories
                 if "/" in inc_name or "\\" in inc_name:
                     try:
@@ -410,11 +434,6 @@ class HeaderContextBuilder:
                         pass
                 else:
                     return str(candidate.resolve())
-            # Don't recurse into excluded dirs
-            _dirs[:] = [d for d in _dirs if d not in {
-                ".git", "build", "dist", "third_party", "external",
-                "vendor", ".ccls-cache", "__pycache__", "bin", "obj",
-            }]
 
         return None
 

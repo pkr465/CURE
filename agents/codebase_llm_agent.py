@@ -1,3 +1,4 @@
+import fnmatch
 import os
 import re
 import json
@@ -81,6 +82,7 @@ class CodebaseLLMAgent:
         codebase_path: str,
         output_dir: str = "./out",
         exclude_dirs: Optional[List[str]] = None,
+        exclude_globs: Optional[List[str]] = None,
         max_files: int = 10000,
         use_ccls: bool = False,
         file_to_fix: Optional[str] = None,
@@ -88,7 +90,7 @@ class CodebaseLLMAgent:
         llm_tools: Optional[LLMTools] = None,
         dep_config: Optional[DependencyBuilderConfig] = None,
         hitl_context: Optional['HITLContext'] = None,
-        constraints_dir: str = "agents/constraints" 
+        constraints_dir: str = "agents/constraints"
     ):
         """
         Initialize CodebaseLLMAgent with dependency injection support.
@@ -96,6 +98,7 @@ class CodebaseLLMAgent:
         :param codebase_path: Root of the C/C++ project.
         :param output_dir: Directory for reports and CCLS cache.
         :param exclude_dirs: Directories to exclude from scanning.
+        :param exclude_globs: Glob patterns to exclude (relative paths, fnmatch syntax).
         :param max_files: Maximum number of files to analyze.
         :param use_ccls: Boolean to enable/disable CCLS dependency analysis.
         :param file_to_fix: Specific relative path to a file to analyze (ignores others).
@@ -139,6 +142,7 @@ class CodebaseLLMAgent:
             ".git", "build", "dist", ".idea", ".vscode",
             "node_modules", "third_party", "__pycache__", ".ccls-cache"
         ])
+        self.exclude_globs = exclude_globs or []
 
         # --- Dependency Injection: LLMTools ---
         if llm_tools:
@@ -192,6 +196,8 @@ class CodebaseLLMAgent:
                         max_header_depth=int(context_cfg.get("max_header_depth", 2)),
                         max_context_chars=int(context_cfg.get("max_context_chars", 6000)),
                         exclude_system_headers=context_cfg.get("exclude_system_headers", True),
+                        exclude_dirs=list(self.exclude_dirs),
+                        exclude_globs=self.exclude_globs,
                     )
                     logger.info(
                         f"[*] Header Context Builder ENABLED "
@@ -343,7 +349,9 @@ class CodebaseLLMAgent:
                 self.is_indexed = self.ingestion.run_indexing(
                     project_root=str(self.codebase_path),
                     output_dir=self.output_dir,
-                    unique_project_prefix=self.project_name
+                    unique_project_prefix=self.project_name,
+                    exclude_dirs=list(self.exclude_dirs),
+                    exclude_globs=self.exclude_globs,
                 )
                 if self.is_indexed:
                     logger.info(
@@ -786,10 +794,19 @@ class CodebaseLLMAgent:
             dirs[:] = [d for d in dirs if d not in self.exclude_dirs]
             for fname in filenames:
                 path = Path(root) / fname
-                if path.suffix.lower() in self.C_EXTS:
-                    found_files.append(path)
-                    if len(found_files) >= self.max_files:
-                        return found_files
+                if path.suffix.lower() not in self.C_EXTS:
+                    continue
+                # Apply glob exclusion patterns (relative to codebase root)
+                if self.exclude_globs:
+                    try:
+                        rel_path_str = path.relative_to(self.codebase_path).as_posix().lower()
+                    except ValueError:
+                        continue
+                    if any(fnmatch.fnmatch(rel_path_str, pat.lower()) for pat in self.exclude_globs):
+                        continue
+                found_files.append(path)
+                if len(found_files) >= self.max_files:
+                    return found_files
         return found_files
 
     def _parse_llm_response(self, response: str, file_path: str, chunk_text: str, start_line: int, chunk_line_count: int) -> List[Dict]:

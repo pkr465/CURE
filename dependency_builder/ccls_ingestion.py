@@ -59,11 +59,20 @@ class CCLSIngestion:
         except Exception as e:
             return False, f"Error checking ccls version: {e}"
 
-    def generate_ccls_config(self, project_root: str) -> str:
+    def generate_ccls_config(
+        self,
+        project_root: str,
+        exclude_dirs: list = None,
+        exclude_globs: list = None,
+    ) -> str:
         """
         Generates the .ccls configuration file at the PROJECT ROOT.
         The .ccls file must sit alongside the source code for ccls to detect it.
         Will not overwrite an existing .ccls or compile_commands.json.
+
+        :param project_root: Absolute path to the source code.
+        :param exclude_dirs: Additional directory names to ignore.
+        :param exclude_globs: Additional glob/regex patterns to ignore.
         """
         ccls_file_path = os.path.join(project_root, ".ccls")
         compile_commands_path = os.path.join(project_root, "compile_commands.json")
@@ -76,9 +85,17 @@ class CCLSIngestion:
             logger.info(f"Existing .ccls config found at {ccls_file_path}")
             return ccls_file_path
 
-        # Generate config from configured defaults
+        # Merge all ignore patterns: config defaults + exclude_dirs + exclude_globs
+        all_ignore_patterns = list(self.config.ccls_ignore_patterns)
+        for dirname in (exclude_dirs or []):
+            # CCLS %ignore uses regex — wrap directory names as path patterns
+            all_ignore_patterns.append(f".*/{re.escape(dirname)}/.*")
+        for glob_pat in (exclude_globs or []):
+            # Convert fnmatch-style globs to rough regex for CCLS
+            regex_pat = glob_pat.replace(".", r"\.").replace("*", ".*").replace("?", ".")
+            all_ignore_patterns.append(regex_pat)
         ignore_lines = "\n".join(
-            f"%ignore {pattern}" for pattern in self.config.ccls_ignore_patterns
+            f"%ignore {pattern}" for pattern in all_ignore_patterns
         )
         ccls_file_content = (
             f"clang\n"
@@ -101,6 +118,8 @@ class CCLSIngestion:
         project_root: str,
         output_dir: str,
         unique_project_prefix: Optional[str] = None,
+        exclude_dirs: list = None,
+        exclude_globs: list = None,
     ) -> bool:
         """
         Runs the ccls indexer.
@@ -108,6 +127,8 @@ class CCLSIngestion:
         :param project_root: Absolute path to the source code.
         :param output_dir: Directory where the .ccls-cache will be stored.
         :param unique_project_prefix: Optional identifier for the project (used for logging).
+        :param exclude_dirs: Additional directory names to ignore during indexing.
+        :param exclude_globs: Additional glob patterns to ignore during indexing.
         """
         # Ensure absolute paths
         abs_project_root = os.path.abspath(project_root)
@@ -124,7 +145,7 @@ class CCLSIngestion:
         os.makedirs(ccls_cache_dir, exist_ok=True)
 
         # 3. Generate Config at Source Root
-        self.generate_ccls_config(abs_project_root)
+        self.generate_ccls_config(abs_project_root, exclude_dirs=exclude_dirs, exclude_globs=exclude_globs)
 
         # 4. Configure CCLS Cache Location
         init_config = json.dumps({

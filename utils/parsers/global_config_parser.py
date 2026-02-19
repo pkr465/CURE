@@ -85,6 +85,9 @@ FLAT_KEY_MAP: Dict[str, str] = {
     # --- ADDED: Chat Endpoint Mapping ---
     "QGENIE_CHAT_ENDPOINT":   "llm.chat_endpoint",
     
+    # Scanning exclusions
+    "EXCLUDE_DIRS":           "scanning.exclude_dirs",
+    "EXCLUDE_GLOBS":          "scanning.exclude_globs",
     # Logging / feature flags
     "LOG_LEVEL":              "logging.level",
     "EMAIL_ID":               "email.recipients",

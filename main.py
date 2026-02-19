@@ -1047,6 +1047,7 @@ def _run_standalone_adapters(
     codebase_path: str,
     output_dir: str,
     exclude_dirs: Optional[List[str]] = None,
+    exclude_globs: Optional[List[str]] = None,
     generate_excel: bool = False,
 ) -> Dict[str, Any]:
     """
@@ -1060,6 +1061,7 @@ def _run_standalone_adapters(
     :param codebase_path: Root path of the C/C++ codebase.
     :param output_dir: Directory for output artifacts.
     :param exclude_dirs: Directories to exclude from scanning.
+    :param exclude_globs: Glob patterns to exclude from scanning.
     :param generate_excel: If True, generate a standalone Excel report.
     :return: Dict mapping adapter names to their result dicts.
     """
@@ -1069,6 +1071,7 @@ def _run_standalone_adapters(
     processor = FileProcessor(
         codebase_path=codebase_path,
         exclude_dirs=exclude_dirs or [],
+        exclude_globs=exclude_globs or [],
     )
     file_cache = processor.process_files()
     console.print(f"[blue]  📁 File cache: {len(file_cache)} files[/blue]")
@@ -1219,6 +1222,25 @@ def main():
         if not os.path.exists(opts["out_dir"]):
             os.makedirs(opts["out_dir"], exist_ok=True)
 
+        # ── Merge exclude_dirs / exclude_globs from config + CLI ──────────
+        # CLI args are merged ON TOP of global_config.yaml entries so that
+        # permanent exclusions live in the config and ad-hoc ones on the CLI.
+        if global_config:
+            cfg_exclude_dirs = global_config.get_list("scanning.exclude_dirs", default=[])
+            cfg_exclude_globs = global_config.get_list("scanning.exclude_globs", default=[])
+        else:
+            cfg_exclude_dirs = []
+            cfg_exclude_globs = []
+        cli_exclude_dirs = opts.get("exclude_dirs") or []
+        cli_exclude_globs = opts.get("exclude_globs") or []
+        # Deduplicated merge (config first, then CLI additions)
+        opts["exclude_dirs"] = list(dict.fromkeys(cfg_exclude_dirs + cli_exclude_dirs))
+        opts["exclude_globs"] = list(dict.fromkeys(cfg_exclude_globs + cli_exclude_globs))
+        if opts["exclude_dirs"]:
+            console.print(f"[dim]Exclude dirs: {opts['exclude_dirs']}[/dim]")
+        if opts["exclude_globs"]:
+            console.print(f"[dim]Exclude globs: {opts['exclude_globs']}[/dim]")
+
         # ── Setup debug.log file handler ─────────────────────────────────
         # Always write DEBUG-level messages to {out_dir}/debug.log so the user
         # can inspect CCLS context, prompt dumps, and other diagnostics even
@@ -1360,6 +1382,7 @@ def main():
                     config=global_config,
                     llm_tools=llm_tools,
                     exclude_dirs=opts.get("exclude_dirs", []),
+                    exclude_globs=opts.get("exclude_globs", []),
                     max_files=opts.get("max_files", 10000),
                     use_ccls=opts.get("use_ccls", False),
                     file_to_fix=opts.get("file_to_fix"),
@@ -1379,6 +1402,7 @@ def main():
                             codebase_path=opts["codebase_path"],
                             output_dir=opts["out_dir"],
                             exclude_dirs=opts.get("exclude_dirs", []),
+                            exclude_globs=opts.get("exclude_globs", []),
                         )
                         console.print("[green]✅ Adapter analysis complete — results will be merged into Excel.[/green]")
                     except Exception as adapter_err:

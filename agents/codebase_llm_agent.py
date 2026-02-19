@@ -40,6 +40,14 @@ except ImportError:
     HITLContext = None
     HITL_AVAILABLE = False
 
+# Header context builder (for context-aware LLM analysis)
+try:
+    from agents.context.header_context_builder import HeaderContextBuilder
+    HEADER_CONTEXT_AVAILABLE = True
+except ImportError:
+    HeaderContextBuilder = None
+    HEADER_CONTEXT_AVAILABLE = False
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -170,6 +178,26 @@ class CodebaseLLMAgent:
 
         self.is_indexed = False
         self.hitl_context = hitl_context
+
+        # --- Header Context Builder (context-aware analysis) ---
+        self.header_context_builder = None
+        context_cfg = self.config.get("context", {}) if self.config else {}
+        if isinstance(context_cfg, dict) and context_cfg.get("enable_header_context", True):
+            if HEADER_CONTEXT_AVAILABLE:
+                try:
+                    inc_paths = context_cfg.get("include_paths", [])
+                    self.header_context_builder = HeaderContextBuilder(
+                        codebase_path=str(self.codebase_path),
+                        include_paths=inc_paths if isinstance(inc_paths, list) else [],
+                        max_header_depth=int(context_cfg.get("max_header_depth", 2)),
+                        max_context_chars=int(context_cfg.get("max_context_chars", 6000)),
+                        exclude_system_headers=context_cfg.get("exclude_system_headers", True),
+                    )
+                    logger.info("[*] Header Context Builder ENABLED for context-aware analysis.")
+                except Exception as hcb_err:
+                    logger.warning(f"Failed to initialize HeaderContextBuilder: {hcb_err}")
+            else:
+                logger.debug("HeaderContextBuilder not available (import failed).")
 
     def _extract_constraint_section(self, content: str, keyword: str) -> str:
         """
@@ -404,7 +432,17 @@ class CodebaseLLMAgent:
 
             # --- Load "Issue Identification Rules" Constraints for this file ---
             constraints_context = self._load_constraints(rel_path, section_keyword="Issue Identification Rules")
-            
+
+            # --- Resolve header includes for context-aware analysis ---
+            file_includes = []
+            if self.header_context_builder:
+                try:
+                    file_includes = self.header_context_builder.resolve_includes(str(file_path))
+                    if file_includes:
+                        logger.debug(f"    Resolved {len(file_includes)} header include(s) for {rel_path}")
+                except Exception as hdr_err:
+                    logger.debug(f"    Header resolution failed for {rel_path}: {hdr_err}")
+
             # 1. Physical Chunking (Brace Counting)
             chunks = self._smart_chunk_code(code_content)
             total_chunks = len(chunks)
@@ -431,7 +469,17 @@ class CodebaseLLMAgent:
                         rel_path, start_line, end_line
                     )
 
-                # 3. Context Construction (Previous Chunk Tail + Dependencies)
+                # 2b. Header Context (struct/enum/macro definitions from included headers)
+                header_context = ""
+                if self.header_context_builder and file_includes:
+                    try:
+                        header_context = self.header_context_builder.build_context_for_chunk(
+                            chunk_text, file_includes
+                        )
+                    except Exception as hctx_err:
+                        logger.debug(f"    Header context build failed: {hctx_err}")
+
+                # 3. Context Construction (Previous Chunk Tail + Dependencies + Header Defs)
                 context_header = ""
                 if prev_chunk_tail:
                     context_header += (
@@ -444,6 +492,11 @@ class CodebaseLLMAgent:
                         f"\n// ... [CONTEXT: External Dependencies & Definitions] ...\n"
                         f"{dependency_context}\n"
                         f"// ... [End External Context] ...\n"
+                    )
+
+                if header_context:
+                    context_header += (
+                        f"\n{header_context}\n"
                     )
 
                 final_chunk_text = (

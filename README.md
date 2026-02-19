@@ -88,6 +88,9 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 │   │   ├── call_graph_adapter.py       #   CCLS call graph analysis
 │   │   ├── function_metrics_adapter.py #   CCLS function metrics
 │   │   └── excel_report_adapter.py     #   static_ Excel tab generator
+│   ├── context/                        # Header context injection for LLM analysis
+│   │   ├── __init__.py
+│   │   └── header_context_builder.py   #   Include resolution, header parsing, context assembly
 │   ├── analyzers/                      # 9 regex-based health analyzers
 │   │   ├── base_runtime_analyzer.py    #   ABC base for all analyzers
 │   │   ├── complexity_analyzer.py
@@ -555,6 +558,7 @@ The `global_config.yaml` file provides hierarchical, typed configuration with `$
 | `excel`              | Report styling (colors, column widths, freeze/filter) |
 | `mermaid`            | Diagram rendering configuration                       |
 | `hitl`               | HITL RAG pipeline — feedback store, constraint parsing |
+| `context`            | Header context injection — include paths, depth, token budget |
 | `telemetry`          | Silent usage telemetry (enable/disable)               |
 | `logging`            | Log level, verbose/debug flags                        |
 
@@ -678,6 +682,91 @@ pip install clang==14.*
  
 
  ```
+
+## Context-Aware LLM Analysis (Header Context Injection)
+
+CURE's LLM-exclusive analysis now automatically resolves `#include` directives and injects relevant type definitions from header files into each code chunk sent to the LLM. This significantly reduces false positives by giving the LLM visibility into enum ranges, macro constants, struct layouts, typedefs, and function signatures that were previously invisible.
+
+### Problem
+
+Without header context, the LLM frequently flags valid code as problematic because it cannot see definitions from included headers. Common false positives include enum-bounded array accesses flagged as out-of-bounds, macro-defined buffer sizes flagged as unchecked, struct field accesses flagged as invalid, and known function return types misinterpreted.
+
+### How It Works
+
+The `HeaderContextBuilder` module (`agents/context/header_context_builder.py`) operates in three phases:
+
+1. **Include Resolution**: Parses `#include` directives from the source file and recursively resolves them to actual header file paths (configurable depth, default 2 levels). System headers (`<stdio.h>`, etc.) are excluded by default since LLMs already understand standard library types.
+
+2. **Header Parsing**: Extracts definitions from each resolved header using regex patterns — enums (with member values and auto-increment tracking), structs/unions (with field types and array sizes), `#define` macros (with numeric value evaluation), typedefs, function prototypes, and extern variable declarations. Results are cached per header file for the entire analysis run.
+
+3. **Relevance Filtering**: For each code chunk, the builder identifies which definitions are actually referenced (via identifier matching) and assembles a concise context string. A priority system (enums > macros > structs > typedefs > protos > externs) ensures the most impactful definitions fit within the configurable token budget.
+
+### What Gets Injected
+
+The context is injected above each code chunk in the LLM prompt:
+
+```c
+// ──── HEADER CONTEXT (from included headers) ────
+// Enums:
+enum wifi_band { WIFI_BAND_2G = 0, WIFI_BAND_5G = 1, WIFI_BAND_6G = 2, WIFI_BAND_MAX = 3 };
+
+// Macros:
+#define MAX_CHANNELS 64
+#define BUF_SIZE 4096
+
+// Structs:
+struct channel_info { uint8_t band; uint16_t freq; int8_t power; uint32_t flags; };
+
+// Function prototypes:
+int wifi_validate_channel(struct channel_info *info, enum wifi_band band);
+// ──── END HEADER CONTEXT ────
+```
+
+### False Positive Categories Addressed
+
+| Pattern | Root Cause | How Context Fixes It |
+|:--------|:-----------|:---------------------|
+| Enum-indexed array flagged as OOB | LLM cannot see enum range | Enum definition shows MAX value matches array size |
+| Macro-bounded buffer flagged as unchecked | LLM cannot see `#define` value | Macro injection shows numeric constant |
+| Struct field access flagged as invalid | LLM cannot see struct layout | Struct definition shows valid fields |
+| `sizeof(struct)` flagged as wrong | LLM does not know struct size | Full struct layout provided |
+| Function return used without NULL check | LLM does not know return type | Prototype shows `int` return (non-pointer) |
+| Typedef'd type misunderstood | LLM does not know underlying type | `typedef uint32_t status_t;` resolves ambiguity |
+| `ARRAY_SIZE` macro not recognized | LLM sees unknown macro | Macro definition injected |
+| Conditional compilation flagged as dead code | LLM does not understand `#ifdef` | Prompt rules cover this pattern |
+| Bit flags used as array indices | LLM confuses flags with indices | Enum with hex values shows bit flag pattern |
+
+### Configuration
+
+Add to `global_config.yaml` (enabled by default):
+
+```yaml
+context:
+  enable_header_context: true
+  include_paths: []              # Additional -I style paths (relative to codebase root)
+  max_header_depth: 2            # How deep to follow #include chains (0 = direct only)
+  max_context_chars: 6000        # Max chars for header context per chunk (~1500 tokens)
+  exclude_system_headers: true   # Skip <stdio.h>, <stdlib.h>, etc.
+```
+
+### Key Design Decisions
+
+- **No CCLS required**: Works entirely via regex-based parsing. When CCLS is also enabled, both context sources complement each other (CCLS provides call graphs, HeaderContext provides type definitions).
+- **Cached per run**: Each header is parsed once and reused across all files and chunks in the analysis run.
+- **Token budget aware**: The `max_context_chars` limit ensures header context does not consume too much of the LLM's input window. Priority ordering ensures the most impactful definitions (enums, macros) are included first.
+- **Backward compatible**: If disabled or if the module fails to import, the pipeline runs exactly as before.
+
+### Files
+
+```text
+agents/context/
+├── __init__.py
+└── header_context_builder.py    # Include resolution, header parsing, context assembly
+```
+
+Modified: `agents/codebase_llm_agent.py` (integration), `prompts/codebase_analysis_prompt.py` (9 context-aware rules), `global_config.yaml` (configuration).
+
+---
 
 ## Contributing
 

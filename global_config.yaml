@@ -259,6 +259,19 @@ hitl:
   auto_persist_feedback: true
 
 # ────────────────────────────────────────────────────────────────────────────
+# Context — Header context injection for LLM-exclusive analysis
+# Parses #include'd headers to extract enum, struct, macro, typedef, and
+# function prototype definitions. Injects relevant definitions into each
+# LLM chunk to reduce false positives (e.g., enum-bounded array access).
+# ────────────────────────────────────────────────────────────────────────────
+context:
+  enable_header_context: true
+  include_paths: []                # Additional -I style paths (relative to codebase root)
+  max_header_depth: 2              # How deep to follow #include chains (0 = direct only)
+  max_context_chars: 6000          # Max chars for header context per chunk (~1500 tokens)
+  exclude_system_headers: true     # Skip <stdio.h>, <stdlib.h>, etc.
+
+# ────────────────────────────────────────────────────────────────────────────
 # Telemetry — Silent usage tracking for framework analytics
 # Uses the same PostgreSQL database (codebase_analytics_db).
 # ────────────────────────────────────────────────────────────────────────────

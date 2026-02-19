@@ -493,6 +493,7 @@ def page_analyze():
                 "modified_file": st.session_state.get("patch_modified_file", ""),
                 "output_dir": st.session_state["output_dir"],
                 "enable_adapters": st.session_state.get("enable_adapters", False),
+                "debug_mode": st.session_state.get("debug_mode", False),
             }
 
             log_queue = Queue()
@@ -547,6 +548,7 @@ def page_analyze():
                 "max_files": st.session_state.get("max_files", 2000),
                 "batch_size": st.session_state.get("batch_size", 25),
                 "exclude_dirs": exclude,
+                "debug_mode": st.session_state.get("debug_mode", False),
             }
 
             # Initialize queue and result store
@@ -1126,6 +1128,7 @@ def page_fixer_qa():
                 "codebase_path": st.session_state.get("codebase_path", "./codebase"),
                 "output_dir": output_dir,
                 "dry_run": dry_run,
+                "debug_mode": st.session_state.get("debug_mode", False),
             }
 
             fixer_queue = Queue()

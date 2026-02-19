@@ -233,9 +233,10 @@ def run_analysis_background(
     phase_statuses = {i: "pending" for i in range(1, 8)}
     result_store["phase_statuses"] = phase_statuses
 
-    # Install log capture handler
+    # Install log capture handler — UI console only sees INFO+
     log_handler = LogCaptureHandler(log_queue, phase_tracker=phase_statuses)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
+    log_handler.setLevel(logging.INFO)
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
@@ -243,8 +244,12 @@ def run_analysis_background(
     output_dir = config.get("output_dir", "./out")
     debug_fh = _setup_debug_file_handler(output_dir)
     if debug_fh:
+        debug_fh.setLevel(logging.DEBUG)
         root_logger.addHandler(debug_fh)
+        # Root must be DEBUG so file handler receives all messages
         root_logger.setLevel(logging.DEBUG)
+    else:
+        root_logger.setLevel(logging.INFO)
 
     # Also capture stdout for rich console output
     console_capture = ConsoleCaptureHandler(log_queue)
@@ -470,7 +475,7 @@ def run_analysis_background(
                 memory_limit_mb=config.get("memory_limit", 3000),
                 enable_llm=config.get("use_llm", False),
                 enable_adapters=config.get("enable_adapters", False),
-                verbose=True,
+                verbose=config.get("debug_mode", False),
                 hitl_context=hitl_context,
             )
 
@@ -551,9 +556,10 @@ def run_fixer_background(
     phase_statuses = {i: "pending" for i in range(1, 5)}
     result_store["fixer_phase_statuses"] = phase_statuses
 
-    # Install log capture
+    # Install log capture — UI console only sees INFO+
     log_handler = LogCaptureHandler(log_queue, phase_tracker=phase_statuses)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
+    log_handler.setLevel(logging.INFO)
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
@@ -561,8 +567,11 @@ def run_fixer_background(
     output_dir = config.get("output_dir", "./out")
     debug_fh = _setup_debug_file_handler(output_dir)
     if debug_fh:
+        debug_fh.setLevel(logging.DEBUG)
         root_logger.addHandler(debug_fh)
         root_logger.setLevel(logging.DEBUG)
+    else:
+        root_logger.setLevel(logging.INFO)
 
     original_stdout = sys.stdout
     console_capture = ConsoleCaptureHandler(log_queue)
@@ -625,7 +634,7 @@ def run_fixer_background(
             config=global_config,
             llm_tools=llm_tools,
             dry_run=dry_run,
-            verbose=True,
+            verbose=config.get("debug_mode", False),
         )
 
         phase_statuses[1] = "completed"
@@ -722,9 +731,10 @@ def run_patch_analysis_background(
     phase_statuses = {i: "pending" for i in range(1, 8)}
     result_store["phase_statuses"] = phase_statuses
 
-    # Install log capture
+    # Install log capture — UI console only sees INFO+
     log_handler = LogCaptureHandler(log_queue, phase_tracker=phase_statuses)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
+    log_handler.setLevel(logging.INFO)
     root_logger = logging.getLogger()
     root_logger.addHandler(log_handler)
 
@@ -732,8 +742,11 @@ def run_patch_analysis_background(
     output_dir = config.get("output_dir", "./out")
     debug_fh = _setup_debug_file_handler(output_dir)
     if debug_fh:
+        debug_fh.setLevel(logging.DEBUG)
         root_logger.addHandler(debug_fh)
         root_logger.setLevel(logging.DEBUG)
+    else:
+        root_logger.setLevel(logging.INFO)
 
     original_stdout = sys.stdout
     console_capture = ConsoleCaptureHandler(log_queue)
@@ -824,7 +837,7 @@ def run_patch_analysis_background(
             llm_tools=llm_tools,
             hitl_context=hitl_context,
             enable_adapters=enable_adapters,
-            verbose=True,
+            verbose=config.get("debug_mode", False),
         )
 
         excel_path = os.path.join(output_dir, "detailed_code_review.xlsx")

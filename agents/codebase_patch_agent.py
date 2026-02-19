@@ -180,15 +180,9 @@ class CodebasePatchAgent:
         # Ensure output dir exists
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Setup Logging
-        logging.basicConfig(
-            filename='patch_agent_debug.log',
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
+        # Setup Logging — use module logger only (do NOT call basicConfig which
+        # installs a StreamHandler on the root logger and floods the UI console)
         self.logger = logging.getLogger(__name__)
-        if self.verbose and not self.logger.handlers:
-             self.logger.addHandler(logging.StreamHandler(sys.stdout))
 
         # Temp directory for analysis artefacts
         self._temp_dir: Optional[Path] = None

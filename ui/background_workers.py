@@ -20,6 +20,20 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# ── Silence noisy third-party loggers ────────────────────────────────────────
+# http.client dumps raw HTTP bytes (STREAM b'IHDR', etc.) at DEBUG level;
+# urllib3/httpcore/httpx log every connection and retry at DEBUG.
+# Force these to WARNING so they only appear in debug.log via the root logger
+# if someone explicitly lowers their level.
+for _noisy in (
+    "http.client", "urllib3", "urllib3.connectionpool",
+    "httpcore", "httpx", "httpcore.http11", "httpcore.connection",
+    "requests", "openai", "anthropic", "PIL", "PIL.PngImagePlugin",
+    "matplotlib", "chardet", "charset_normalizer",
+    "dependency_builder", "DependencyFetcher",
+):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 # ── Telemetry singleton (lazy init) ──────────────────────────────────────────
 _telemetry_service = None
 
@@ -123,32 +137,37 @@ class ConsoleCaptureHandler:
     """
     Intercepts rich.console.Console output by wrapping the file object.
     Pushes captured lines to a Queue for UI display.
+    When debug_mode is False, stdout passthrough is suppressed (output only
+    goes to debug.log via the logging file handler).
     """
 
-    def __init__(self, log_queue: Queue, original_stdout=None):
+    def __init__(self, log_queue: Queue, original_stdout=None, debug_mode: bool = False):
         self.log_queue = log_queue
         self.original_stdout = original_stdout or sys.stdout
+        self.debug_mode = debug_mode
         self._buffer = ""
 
     def write(self, text: str):
-        # Pass through to original stdout
-        self.original_stdout.write(text)
-        # Capture non-empty lines
-        self._buffer += text
-        while "\n" in self._buffer:
-            line, self._buffer = self._buffer.split("\n", 1)
-            line = line.strip()
-            if line:
-                # Strip ANSI escape codes for clean display
-                clean = _strip_ansi(line)
-                if clean:
-                    ts = datetime.now().strftime("%H:%M:%S")
-                    self.log_queue.put({
-                        "phase": 0,
-                        "message": clean,
-                        "level": "INFO",
-                        "timestamp": ts,
-                    })
+        # Only pass through to original stdout in debug mode
+        if self.debug_mode:
+            self.original_stdout.write(text)
+        # Capture non-empty lines for UI only in debug mode
+        if self.debug_mode:
+            self._buffer += text
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                line = line.strip()
+                if line:
+                    # Strip ANSI escape codes for clean display
+                    clean = _strip_ansi(line)
+                    if clean:
+                        ts = datetime.now().strftime("%H:%M:%S")
+                        self.log_queue.put({
+                            "phase": 0,
+                            "message": clean,
+                            "level": "INFO",
+                            "timestamp": ts,
+                        })
 
     def flush(self):
         self.original_stdout.flush()
@@ -233,11 +252,17 @@ def run_analysis_background(
     phase_statuses = {i: "pending" for i in range(1, 8)}
     result_store["phase_statuses"] = phase_statuses
 
-    # Install log capture handler — UI console only sees INFO+
+    # Remove any pre-existing StreamHandlers (e.g. from logging.basicConfig in main.py)
+    # so debug messages don't leak to the terminal console
+    root_logger = logging.getLogger()
+    for h in root_logger.handlers[:]:
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            root_logger.removeHandler(h)
+
+    # Install log capture handler — UI console only sees WARNING+
     log_handler = LogCaptureHandler(log_queue, phase_tracker=phase_statuses)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
-    log_handler.setLevel(logging.INFO)
-    root_logger = logging.getLogger()
+    log_handler.setLevel(logging.WARNING)
     root_logger.addHandler(log_handler)
 
     # Debug file handler — writes all DEBUG+ logs to {output_dir}/debug.log
@@ -252,7 +277,7 @@ def run_analysis_background(
         root_logger.setLevel(logging.INFO)
 
     # Also capture stdout for rich console output
-    console_capture = ConsoleCaptureHandler(log_queue)
+    console_capture = ConsoleCaptureHandler(log_queue, debug_mode=config.get("debug_mode", False))
     original_stdout = sys.stdout
     sys.stdout = console_capture
 
@@ -556,11 +581,17 @@ def run_fixer_background(
     phase_statuses = {i: "pending" for i in range(1, 5)}
     result_store["fixer_phase_statuses"] = phase_statuses
 
-    # Install log capture — UI console only sees INFO+
+    # Remove any pre-existing StreamHandlers (e.g. from logging.basicConfig in main.py)
+    # so debug messages don't leak to the terminal console
+    root_logger = logging.getLogger()
+    for h in root_logger.handlers[:]:
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            root_logger.removeHandler(h)
+
+    # Install log capture — UI console only sees WARNING+
     log_handler = LogCaptureHandler(log_queue, phase_tracker=phase_statuses)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
-    log_handler.setLevel(logging.INFO)
-    root_logger = logging.getLogger()
+    log_handler.setLevel(logging.WARNING)
     root_logger.addHandler(log_handler)
 
     # Debug file handler
@@ -574,7 +605,7 @@ def run_fixer_background(
         root_logger.setLevel(logging.INFO)
 
     original_stdout = sys.stdout
-    console_capture = ConsoleCaptureHandler(log_queue)
+    console_capture = ConsoleCaptureHandler(log_queue, debug_mode=config.get("debug_mode", False))
     sys.stdout = console_capture
 
     start_time = time.time()
@@ -731,11 +762,17 @@ def run_patch_analysis_background(
     phase_statuses = {i: "pending" for i in range(1, 8)}
     result_store["phase_statuses"] = phase_statuses
 
-    # Install log capture — UI console only sees INFO+
+    # Remove any pre-existing StreamHandlers (e.g. from logging.basicConfig in main.py)
+    # so debug messages don't leak to the terminal console
+    root_logger = logging.getLogger()
+    for h in root_logger.handlers[:]:
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            root_logger.removeHandler(h)
+
+    # Install log capture — UI console only sees WARNING+
     log_handler = LogCaptureHandler(log_queue, phase_tracker=phase_statuses)
     log_handler.setFormatter(logging.Formatter("%(message)s"))
-    log_handler.setLevel(logging.INFO)
-    root_logger = logging.getLogger()
+    log_handler.setLevel(logging.WARNING)
     root_logger.addHandler(log_handler)
 
     # Debug file handler
@@ -749,7 +786,7 @@ def run_patch_analysis_background(
         root_logger.setLevel(logging.INFO)
 
     original_stdout = sys.stdout
-    console_capture = ConsoleCaptureHandler(log_queue)
+    console_capture = ConsoleCaptureHandler(log_queue, debug_mode=config.get("debug_mode", False))
     sys.stdout = console_capture
 
     start_time = time.time()

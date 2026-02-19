@@ -31,10 +31,6 @@ def semantic_highlight_handler(logger: logging.Logger) -> Callable[[Dict[str, An
                         continue
                     start = r.get("start", {})
                     end = r.get("end", {})
-                    logger.debug(
-                        f"  - Symbol: Kind={kind}, Role={role} | "
-                        f"Range: L{start.get('line')}:{start.get('character')} - L{end.get('line')}:{end.get('character')}"
-                    )
         except Exception as e:
             logger.debug(f"[SemanticHighlight] Error processing notification: {e}")
     return handler

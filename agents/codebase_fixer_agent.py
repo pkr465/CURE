@@ -120,16 +120,9 @@ class CodebaseFixerAgent:
                 if potential_dir.exists():
                     self.constraints_dir = potential_dir
 
-        # Setup Logging
-        logging.basicConfig(
-            filename='fixer_agent_debug.log',
-            level=logging.INFO,
-            format='%(asctime)s - %(levelname)s - %(message)s'
-        )
+        # Setup Logging — use module logger only (do NOT call basicConfig which
+        # installs a StreamHandler on the root logger and floods the UI console)
         self.logger = logging.getLogger(__name__)
-        # Ensure output to console if verbose
-        if self.verbose and not self.logger.handlers:
-             self.logger.addHandler(logging.StreamHandler(sys.stdout))
 
         # Initialize LLM Tools
         self._initialize_llm_tools(llm_tools)

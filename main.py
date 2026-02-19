@@ -174,6 +174,16 @@ for handler in logging.getLogger().handlers:
 
 logger = logging.getLogger(__name__)
 
+# Silence noisy third-party loggers that dump raw HTTP bytes at DEBUG level
+for _noisy in (
+    "http.client", "urllib3", "urllib3.connectionpool",
+    "httpcore", "httpx", "httpcore.http11", "httpcore.connection",
+    "requests", "openai", "anthropic", "PIL", "PIL.PngImagePlugin",
+    "matplotlib", "chardet", "charset_normalizer",
+    "dependency_builder", "DependencyFetcher",
+):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 
 def get_memory_usage() -> float:
     process = psutil.Process()
@@ -1162,6 +1172,35 @@ def main():
             or env_config.get("CODE_BASE_PATH")
             or "./codebase"
         )
+
+        # ── Single-file convenience: if --file-to-fix is an absolute path and
+        # no explicit --codebase-path was given, derive codebase from the file's
+        # parent directory so the user doesn't have to specify both.
+        file_to_fix = opts.get("file_to_fix")
+        if file_to_fix:
+            ftf_path = Path(file_to_fix)
+            # If the file is absolute and codebase_path is just the default
+            if ftf_path.is_absolute() and codebase_path == "./codebase":
+                codebase_path = str(ftf_path.parent)
+                console.print(
+                    f"[blue]ℹ --file-to-fix is absolute; using parent as "
+                    f"codebase path: {codebase_path}[/blue]"
+                )
+            # If relative file_to_fix doesn't exist under codebase_path, check
+            # if it exists as an absolute path and adjust accordingly
+            elif not ftf_path.is_absolute():
+                resolved = Path(codebase_path) / ftf_path
+                if not resolved.exists() and ftf_path.exists():
+                    # The path is actually relative to CWD, not codebase
+                    abs_ftf = ftf_path.resolve()
+                    opts["file_to_fix"] = str(abs_ftf)
+                    if codebase_path == "./codebase":
+                        codebase_path = str(abs_ftf.parent)
+                        console.print(
+                            f"[blue]ℹ Resolved --file-to-fix to: {abs_ftf}; "
+                            f"using parent as codebase path: {codebase_path}[/blue]"
+                        )
+
         if not Path(codebase_path).exists():
             console.print(f"[red]Error: Codebase path does not exist: {codebase_path}[/red]")
             console.print("[yellow]Use --codebase-path to specify the correct path[/yellow]")

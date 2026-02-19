@@ -13,6 +13,7 @@ import re
 import io
 import json
 import logging
+import shutil
 import time
 import threading
 from pathlib import Path
@@ -123,6 +124,7 @@ _DEFAULTS = {
     "enable_adapters": False,
     "use_ccls": False,
     "exclude_dirs": "",
+    "file_to_fix": None,
     # Pipeline state
     "analysis_in_progress": False,
     "analysis_complete": False,
@@ -222,6 +224,46 @@ def _validate_codebase_path(path: str) -> tuple:
     return True, "Valid C/C++ codebase."
 
 
+def _clean_output_dir(output_dir: str) -> None:
+    """Remove previous run artifacts from the output directory.
+
+    Deletes known subdirectories and report files so that a fresh analysis
+    starts from a clean slate.  The output directory itself is preserved.
+    """
+    if not output_dir or not os.path.isdir(output_dir):
+        return
+
+    # Subdirectories to wipe entirely
+    # NOTE: _uploads is NOT included here — it is cleared at upload time
+    # (before new files are saved) so the analysis can still read them.
+    _SUBDIRS = [
+        "prompt_dumps",
+        "parseddata",
+        "shelved_backups",
+    ]
+    for sub in _SUBDIRS:
+        p = os.path.join(output_dir, sub)
+        if os.path.isdir(p):
+            shutil.rmtree(p, ignore_errors=True)
+
+    # Individual files to remove
+    _FILES = [
+        "detailed_code_review.xlsx",
+        "detailed_code_review.csv",
+        "llm_analysis_metrics.jsonl",
+        "debug.log",
+        "final_execution_audit.xlsx",
+        "_generated.patch",
+    ]
+    for fname in _FILES:
+        p = os.path.join(output_dir, fname)
+        if os.path.isfile(p):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+
+
 def _drain_log_queue(queue_obj: Queue, target_list: list) -> bool:
     """Drain all pending messages from a Queue into a list. Returns True if __DONE__ found."""
     done = False
@@ -260,7 +302,7 @@ def page_analyze():
                 "analysis_complete", "analysis_results", "analysis_metrics",
                 "pipeline_logs", "phase_statuses", "feedback_df",
                 "fixer_complete", "fixer_logs", "qa_results",
-                "result_store", "directives_path",
+                "result_store", "directives_path", "file_to_fix",
             ]:
                 st.session_state[key] = _DEFAULTS.get(key, None)
             st.rerun()
@@ -284,8 +326,28 @@ def page_analyze():
             key="analyze_codebase_browser",
             show_files=True,
             file_extensions=[".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"],
-            help_text="Absolute or relative path to the C/C++ project directory.",
+            help_text="Path to a C/C++ project directory, or a single source file.",
         )
+
+        # ── Single-file detection ────────────────────────────────────
+        # If the user selected a single C/C++ file instead of a directory,
+        # treat the parent as the codebase and store the file as file_to_fix.
+        cpp_exts = {".c", ".cpp", ".cc", ".cxx", ".h", ".hpp", ".hh", ".hxx"}
+        if (
+            codebase_path
+            and os.path.isfile(codebase_path)
+            and Path(codebase_path).suffix.lower() in cpp_exts
+        ):
+            st.session_state["file_to_fix"] = codebase_path
+            codebase_path = str(Path(codebase_path).parent)
+            st.info(
+                f"🎯 **Single-file mode**: analyzing only "
+                f"`{Path(st.session_state['file_to_fix']).name}` "
+                f"within `{codebase_path}`"
+            )
+        else:
+            st.session_state["file_to_fix"] = None
+
         st.session_state["codebase_path"] = codebase_path
 
         if codebase_path:
@@ -302,8 +364,10 @@ def page_analyze():
             type=["c", "cpp", "cc", "cxx", "h", "hpp", "hh", "hxx"],
         )
         if uploaded:
-            # Save to temp directory
+            # Clear previous uploads so old files don't accumulate across runs
             upload_dir = os.path.join(st.session_state["output_dir"], "_uploads")
+            if os.path.isdir(upload_dir):
+                shutil.rmtree(upload_dir, ignore_errors=True)
             os.makedirs(upload_dir, exist_ok=True)
             for f in uploaded:
                 with open(os.path.join(upload_dir, f.name), "wb") as out:
@@ -496,6 +560,9 @@ def page_analyze():
                 "debug_mode": st.session_state.get("debug_mode", False),
             }
 
+            # Clean previous run artifacts
+            _clean_output_dir(config["output_dir"])
+
             log_queue = Queue()
             result_store = {"status": "running", "phase_statuses": {}}
 
@@ -549,7 +616,11 @@ def page_analyze():
                 "batch_size": st.session_state.get("batch_size", 25),
                 "exclude_dirs": exclude,
                 "debug_mode": st.session_state.get("debug_mode", False),
+                "file_to_fix": st.session_state.get("file_to_fix"),
             }
+
+            # Clean previous run artifacts from the output directory
+            _clean_output_dir(config["output_dir"])
 
             # Initialize queue and result store
             log_queue = Queue()

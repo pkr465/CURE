@@ -553,6 +553,22 @@ class CodebaseLLMAgent:
                         agent_type="llm_agent",
                     )
 
+                # ── Debug: dump prompt + chunk to {output_dir}/prompt_dumps/ ──
+                if logger.isEnabledFor(logging.DEBUG):
+                    try:
+                        dump_dir = os.path.join(self.output_dir, "prompt_dumps")
+                        os.makedirs(dump_dir, exist_ok=True)
+                        safe_name = rel_path.replace("/", "__").replace("\\", "__")
+                        dump_path = os.path.join(
+                            dump_dir,
+                            f"{safe_name}_chunk{chunk_idx + 1}.txt",
+                        )
+                        with open(dump_path, "w", encoding="utf-8") as df:
+                            df.write(final_prompt)
+                        logger.debug(f"    Prompt dump: {dump_path}")
+                    except Exception:
+                        pass  # never fail on debug dump
+
                 response = self.llm_tools.llm_call(final_prompt)
 
                 # 5. Parsing

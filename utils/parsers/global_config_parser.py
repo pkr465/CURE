@@ -450,7 +450,6 @@ class GlobalConfig:
         if base_path and os.path.isfile(base_path):
             self._data = _load_yaml(base_path)
             self._config_file = base_path
-            logger.info("Loaded config from: %s", base_path)
         else:
             logger.info("No YAML config file found; using defaults and environment.")
             self._data = {}
@@ -503,7 +502,6 @@ class GlobalConfig:
             env_val = os.environ.get(env_key)
             if env_val is not None:
                 _set_by_path(self._data, dot_path, env_val)
-                logger.debug("Env override: %s -> %s", env_key, dot_path)
 
     def _normalize_paths(self) -> None:
         """Resolve and expand path-type values."""

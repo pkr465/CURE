@@ -4,13 +4,11 @@ import logging
 import sys
 import re
 
-logging.basicConfig(
-    level=logging.WARNING,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    stream=sys.stdout,  # <-- add this to send logs to stdout
-    force=True          # <-- ensure configuration is enforced, even if already set
-)
+# NOTE: Do NOT use logging.basicConfig(force=True) here — it resets the root
+# logger and installs a StreamHandler that floods the Streamlit UI console.
+# Module-level loggers inherit from the root logger configured by the workers.
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
 
 class CodebaseAnalysisSessionState:
     """

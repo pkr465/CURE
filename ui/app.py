@@ -2150,6 +2150,9 @@ def page_constraints_generator():
             f"# Generated for: {source_filename}\n# NAMING CONVENTION:",
         )
         st.session_state["constraints_generated_md"] = filled
+        # Clear the editor widget key so it picks up the new value
+        st.session_state.pop("constraints_editor", None)
+        st.rerun()
 
     # ── Generate with LLM ────────────────────────────────────────────────
     if generate_clicked:
@@ -2188,7 +2191,9 @@ def page_constraints_generator():
                     cleaned = cleaned[:-3].strip()
 
                 st.session_state["constraints_generated_md"] = cleaned
-                st.success("Constraints file generated successfully!")
+                # Clear the editor widget key so it picks up the new value
+                st.session_state.pop("constraints_editor", None)
+                st.rerun()
 
             except Exception as e:
                 st.error(f"LLM call failed: {e}")
@@ -2198,6 +2203,17 @@ def page_constraints_generator():
     generated_md = st.session_state.get("constraints_generated_md", "")
     if generated_md:
         st.divider()
+
+        # Auto-save the generated file to the output directory for easy access
+        auto_save_dir = st.session_state.get("output_dir", "./out")
+        auto_save_path = os.path.join(auto_save_dir, output_name)
+        try:
+            os.makedirs(auto_save_dir, exist_ok=True)
+            with open(auto_save_path, "w", encoding="utf-8") as f:
+                f.write(generated_md)
+        except Exception:
+            auto_save_path = None
+
         st.markdown(
             "<div style='display:flex; align-items:center; gap:8px; margin-bottom:8px;'>"
             "<span style='font-size:20px;'>👁️</span>"
@@ -2205,6 +2221,9 @@ def page_constraints_generator():
             "</div>",
             unsafe_allow_html=True,
         )
+
+        if auto_save_path:
+            st.success(f"Constraints file generated: `{auto_save_path}`")
 
         # Editable text area with the generated content
         edited_md = st.text_area(
@@ -2229,11 +2248,22 @@ def page_constraints_generator():
             unsafe_allow_html=True,
         )
 
-        save_col1, save_col2, save_col3 = st.columns(3)
+        dl_col, save_col, clear_col = st.columns(3)
 
-        with save_col1:
+        with dl_col:
+            # Download .md file directly from the page
+            st.download_button(
+                "📥 Download .md File",
+                data=edited_md,
+                file_name=output_name,
+                mime="text/markdown",
+                type="primary",
+                key="constraints_download_btn",
+            )
+
+        with save_col:
             # Save directly to agents/constraints/
-            if st.button("💾 Save to Constraints Folder", type="primary"):
+            if st.button("💾 Save to Constraints Folder", key="constraints_save_btn"):
                 save_path = os.path.join(_CONSTRAINTS_DIR, output_name)
                 try:
                     os.makedirs(_CONSTRAINTS_DIR, exist_ok=True)
@@ -2243,19 +2273,11 @@ def page_constraints_generator():
                 except Exception as e:
                     st.error(f"Failed to save: {e}")
 
-        with save_col2:
-            # Download
-            st.download_button(
-                "📥 Download",
-                data=edited_md,
-                file_name=output_name,
-                mime="text/markdown",
-            )
-
-        with save_col3:
+        with clear_col:
             # Clear / reset
-            if st.button("🗑️ Clear"):
+            if st.button("🗑️ Clear", key="constraints_clear_btn"):
                 st.session_state["constraints_generated_md"] = ""
+                st.session_state.pop("constraints_editor", None)
                 st.rerun()
 
 

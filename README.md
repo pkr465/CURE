@@ -394,6 +394,8 @@ Create a file (e.g., `agents/constraints/my_driver.c_constraints.md`) using this
 | `--batch-size N`                | Files per analysis batch (default: 25)                                    |
 | `--exclude-dirs D [D]`          | Directories to exclude (merged with `scanning.exclude_dirs` config)       |
 | `--exclude-globs G [G]`         | Glob patterns to exclude (merged with `scanning.exclude_globs` config)    |
+| `--generate-constraints`        | Auto-generate `codebase_constraints.md` from symbols and exit             |
+| `--include-custom-constraints F [F]` | Additional custom constraint `.md` files to include in analysis      |
 | `--enable-vector-db`            | Enable vector DB ingestion pipeline                                       |
 | `--vector-chunk-size N`         | Chunk size for vector embeddings (default: 4000)                          |
 | `--vector-overlap-size N`       | Overlap between chunks (default: 200)                                     |
@@ -818,6 +820,137 @@ Duplicates are automatically removed. Config entries take precedence in ordering
 ### Built-in Defaults
 
 The following directories are always excluded from file discovery, regardless of configuration: `.git`, `build`, `node_modules`, `.venv`, `__pycache__`, `dist`, `.ccls-cache`, `bin`, `obj`, and others. The `exclude_dirs` config and CLI options add to these built-in defaults.
+
+---
+
+## Automated Constraint Generation & Context Validation
+
+CURE includes two tools that automatically reduce false positives in LLM-based analysis by extracting codebase-wide symbol knowledge and tracing validation patterns at the per-chunk level.
+
+### Tool 1: Codebase Constraint Generator
+
+`agents/constraints/codebase_constraint_generator.py` scans the entire codebase and extracts enums, structs, macros, bit-field patterns, and helper/validator functions, then generates a `codebase_constraints.md` file with IGNORE rules for common false positive categories.
+
+**What it generates:**
+
+| Category | Example Rule |
+|:---------|:-------------|
+| Enum-bounded arrays | IGNORE bounds check when array sized to `MAX_QUEUES` and indexed by `enum queue_type` |
+| Hardware-init structs | IGNORE NULL checks for `struct dp_soc`, `struct dp_pdev` (allocated at init, never NULL) |
+| Macro-defined limits | IGNORE bounds warnings where index compared against `MAX_RINGS`, `BUF_SIZE`, etc. |
+| Bitmask operations | IGNORE "suspicious bit manipulation" for `_MASK`/`_SHIFT`/`_BIT` macros |
+| Validator functions | IGNORE missing validation if `check_*()` or `validate_*()` called upstream |
+| Chained dereferences | IGNORE intermediate NULL checks when root pointer (`soc->pdev->ops`) is validated |
+
+**CLI usage:**
+
+```bash
+# Standalone — generates codebase_constraints.md and exits
+python main.py --generate-constraints --codebase-path /path/to/src
+
+# Or run the script directly
+python agents/constraints/codebase_constraint_generator.py \
+  --codebase-path /path/to/src \
+  --output agents/constraints/codebase_constraints.md \
+  --exclude-dirs build,vendor
+```
+
+The generated file is automatically loaded by `CodebaseLLMAgent` alongside `common_constraints.md` and file-specific constraint files.
+
+**Custom constraint files:** You can supply additional constraint `.md` files via `--include-custom-constraints`. These are loaded after the auto-generated codebase constraints and before file-specific constraints, allowing project-specific or team-specific rules:
+
+```bash
+python main.py --llm-exclusive --codebase-path /path/to/src \
+  --include-custom-constraints my_team_rules.md /shared/security_constraints.md
+```
+
+Paths can be absolute or relative (resolved against CWD first, then `agents/constraints/`). The constraint loading order is: `common_constraints.md` → `codebase_constraints.md` (auto-generated) → custom constraint files → `<filename>_constraints.md` (file-specific).
+
+**Streamlit UI:** The Constraints tab includes an "Auto-Generate Codebase Constraints" expander that runs the generator and provides a download button.
+
+### Tool 2: Context Validator (Per-Chunk Pre-Analysis)
+
+`agents/constraints/context_validator.py` runs inline during LLM analysis. For each code chunk, it traces pointer validations, array bounds, return-value checks, and chained dereferences using regex heuristics, then injects a compact validation summary into the prompt before the LLM sees the code.
+
+**What it traces:**
+
+| Check Type | Heuristics |
+|:-----------|:-----------|
+| Pointer null-checks | Local allocation detection (FLAG), null-check in scope (IGNORE), static function parameter (IGNORE — caller validates), struct member chain inheritance |
+| Array bounds | Loop-bound detection (`for i < MAX`), comparison (`if idx < LIMIT`), modulo (`idx % SIZE`), enum type inference |
+| Return values | Immediate check (`if (!ptr)`), guard pattern (`ptr = alloc(); if (!ptr) return`), function name heuristics |
+| Chained dereferences | Root pointer validated → entire chain (`soc->pdev->ops->callback`) inherits IGNORE |
+
+**Per-chunk output injected into prompt:**
+
+```c
+// ── CONTEXT VALIDATION (pre-analysis) ──────────────
+// Pointers:
+//   soc              -> VALIDATED (param of static dp_rx_process() — caller validates)
+//   buf              -> LOCALLY_ALLOCATED (kzalloc line 155) — FLAG if unchecked
+//   peer             -> VALIDATED (null-checked in current chunk)
+// Array Bounds:
+//   queue_id         -> BOUNDED (enum dp_queue_type, MAX=8)
+//   ring_idx         -> BOUNDED (compared < MAX_RINGS at line 148)
+// Returns:
+//   find_peer()      -> VALIDATED (checked at line 160)
+// ── END VALIDATION ─────────────────────────────────
+```
+
+The context validator works entirely via regex heuristics (no CCLS required). When CCLS is available, it can optionally use call-hierarchy data for upstream pointer tracing. If the validator fails or is unavailable, the pipeline continues without it.
+
+### Tool 3: Static Call Stack Analyzer (Cross-Function Tracing)
+
+`agents/context/static_call_stack_analyzer.py` builds a codebase-wide function index at startup, then for each code chunk traces every pointer, array index, divisor, enum, and macro through the call chain to find where values are set, validated, or constrained. This deep call-chain evidence is injected as Context Layer 4 alongside the existing header context and validation context.
+
+**What it traces:**
+
+| Category | Trace Method |
+|:---------|:-------------|
+| Pointer dereferences (`ptr->x`) | Walk reverse call graph, check null_checks in each caller's function body |
+| Array indices (`arr[idx]`) | Check loop bounds, enum type, comparison guards, modulo ops in current func + callers |
+| Divisions (`a / b`) | Trace divisor through assignments and caller parameters for non-zero guarantee |
+| Enum usage (`switch(val)`) | Resolve enum type and report full range from codebase index |
+| Macro values (`BUF_SIZE`) | Resolve numeric/string value from HeaderContextBuilder cache |
+| Loop bounds (`i < limit`) | Trace limit through assignments, macros, enum members, caller parameters |
+
+**Per-chunk output injected into prompt:**
+
+```c
+// ──── CALL STACK CONTEXT ────────────────────────────────
+// Pointers:
+//   req            -> NULL-checked in caller handle_msg() at L245
+//   ctx            -> Param of static func; caller validates
+//   buf            -> Allocated (kmalloc), needs null check
+// Array Bounds:
+//   idx            -> Bounded: for-loop i < MAX_ENTRIES (=64)
+//   queue_id       -> Enum dp_queue_type range [0..7]
+// Division Safety:
+//   count          -> Guaranteed non-zero: checked in caller
+// Macros: BUF_SIZE=4096, MAX_RETRIES=10
+// ──── END CALL STACK CONTEXT ────────────────────────────
+```
+
+The analyzer works in two modes: regex-only (always available, no CCLS required) and CCLS-enhanced (uses LSP call hierarchy when available). Index building happens once at startup (~2-5 seconds for 100K LOC), per-chunk analysis takes <50ms.
+
+### Files
+
+```text
+agents/constraints/
+├── codebase_constraint_generator.py  # Tool 1: symbol extraction + constraint rule generation
+├── context_validator.py              # Tool 2: per-chunk validation context builder
+├── codebase_constraints.md           # Auto-generated output (after running Tool 1)
+├── common_constraints.md             # Manual global rules
+├── TEMPLATE_constraints.md           # Template for per-file constraints
+└── GENERATE_CONSTRAINTS_PROMPT.md    # LLM prompt for constraint generation
+
+agents/context/
+├── __init__.py
+├── header_context_builder.py         # Include resolution, header parsing, context assembly
+└── static_call_stack_analyzer.py     # Tool 3: codebase-wide call chain tracing
+```
+
+Modified: `agents/codebase_llm_agent.py` (ContextValidator integration, `codebase_constraints.md` loading, custom constraint loading, StaticCallStackAnalyzer integration), `main.py` (`--generate-constraints` flag, `--include-custom-constraints` flag), `ui/app.py` (auto-generate button in Constraints tab, custom constraint file input), `ui/background_workers.py` (custom constraints wiring).
 
 ---
 

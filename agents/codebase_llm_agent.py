@@ -49,6 +49,22 @@ except ImportError:
     HeaderContextBuilder = None
     HEADER_CONTEXT_AVAILABLE = False
 
+# Context validator (per-chunk false positive reduction)
+try:
+    from agents.constraints.context_validator import ContextValidator
+    CONTEXT_VALIDATOR_AVAILABLE = True
+except ImportError:
+    ContextValidator = None
+    CONTEXT_VALIDATOR_AVAILABLE = False
+
+# Static call stack analyzer (cross-function call chain tracing)
+try:
+    from agents.context.static_call_stack_analyzer import StaticCallStackAnalyzer
+    CALL_STACK_ANALYZER_AVAILABLE = True
+except ImportError:
+    StaticCallStackAnalyzer = None
+    CALL_STACK_ANALYZER_AVAILABLE = False
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -90,7 +106,8 @@ class CodebaseLLMAgent:
         llm_tools: Optional[LLMTools] = None,
         dep_config: Optional[DependencyBuilderConfig] = None,
         hitl_context: Optional['HITLContext'] = None,
-        constraints_dir: str = "agents/constraints"
+        constraints_dir: str = "agents/constraints",
+        custom_constraints: Optional[List[str]] = None,
     ):
         """
         Initialize CodebaseLLMAgent with dependency injection support.
@@ -107,6 +124,7 @@ class CodebaseLLMAgent:
         :param dep_config: Optional DependencyBuilderConfig for dependency services.
         :param hitl_context: Optional HITLContext for human-in-the-loop feedback integration.
         :param constraints_dir: Path to the constraints directory (default: agents/constraints).
+        :param custom_constraints: Additional custom constraint .md file paths to include.
         """
         self.config = config or GlobalConfig()
         self.codebase_path = Path(codebase_path).resolve()
@@ -143,6 +161,7 @@ class CodebaseLLMAgent:
             "node_modules", "third_party", "__pycache__", ".ccls-cache"
         ])
         self.exclude_globs = exclude_globs or []
+        self.custom_constraints = custom_constraints or []
 
         # --- Dependency Injection: LLMTools ---
         if llm_tools:
@@ -209,6 +228,40 @@ class CodebaseLLMAgent:
             else:
                 logger.debug("HeaderContextBuilder not available (import failed).")
 
+        # --- Context Validator (per-chunk false positive reduction) ---
+        self.context_validator = None
+        if CONTEXT_VALIDATOR_AVAILABLE:
+            try:
+                self.context_validator = ContextValidator(
+                    codebase_path=str(self.codebase_path),
+                    use_ccls=self.use_ccls and self.is_indexed,
+                    ccls_navigator=None,  # Will be updated after CCLS indexing
+                )
+                logger.info("[*] Context Validator ENABLED (heuristic mode)")
+            except Exception as cv_err:
+                logger.debug(f"Context Validator init failed: {cv_err}")
+
+        # --- Static Call Stack Analyzer (cross-function call chain tracing) ---
+        self.call_stack_analyzer = None
+        if CALL_STACK_ANALYZER_AVAILABLE:
+            try:
+                self.call_stack_analyzer = StaticCallStackAnalyzer(
+                    codebase_path=str(self.codebase_path),
+                    exclude_dirs=list(self.exclude_dirs),
+                    exclude_globs=self.exclude_globs,
+                    header_context_builder=self.header_context_builder,
+                    use_ccls=self.use_ccls,
+                    ccls_navigator=None,  # Updated after CCLS indexing
+                    max_trace_depth=3,
+                    max_context_chars=1200,
+                )
+                logger.info(
+                    f"[*] Call Stack Analyzer ENABLED "
+                    f"({self.call_stack_analyzer.index.stats()})"
+                )
+            except Exception as csa_err:
+                logger.warning(f"Call Stack Analyzer init failed: {csa_err}")
+
     def _extract_constraint_section(self, content: str, keyword: str) -> str:
         """
         Parses Markdown content to find a header containing the keyword (e.g., 'Issue Identification Rules')
@@ -267,6 +320,45 @@ class CodebaseLLMAgent:
                         combined_constraints.append(f"--- GLOBAL IDENTIFICATION RULES ---\n{section_content}\n")
             except Exception as e:
                 logger.warning(f"Failed to read common constraints at {common_file}: {e}")
+
+        # ---------------------------------------------------------
+        # 1b. Load Auto-Generated Codebase Constraints
+        # ---------------------------------------------------------
+        codebase_file = base_dir / "codebase_constraints.md"
+        if codebase_file.exists():
+            try:
+                with open(codebase_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    section_content = self._extract_constraint_section(content, section_keyword)
+                    if section_content:
+                        combined_constraints.append(f"--- AUTO-GENERATED CODEBASE RULES ---\n{section_content}\n")
+                        logger.info(f"    > Loaded auto-generated codebase constraints: {codebase_file}")
+            except Exception as e:
+                logger.warning(f"Failed to read codebase constraints at {codebase_file}: {e}")
+
+        # ---------------------------------------------------------
+        # 1c. Load Custom Constraint Files (user-provided paths)
+        # ---------------------------------------------------------
+        for custom_path in self.custom_constraints:
+            cpath = Path(custom_path)
+            if not cpath.is_absolute():
+                # Try relative to CWD, then relative to constraints_dir
+                if not cpath.exists():
+                    cpath = base_dir / custom_path
+            if cpath.exists():
+                try:
+                    with open(cpath, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        section_content = self._extract_constraint_section(content, section_keyword)
+                        if section_content:
+                            combined_constraints.append(
+                                f"--- CUSTOM RULES ({cpath.name}) ---\n{section_content}\n"
+                            )
+                            logger.info(f"    > Loaded custom constraints: {cpath}")
+                except Exception as e:
+                    logger.warning(f"Failed to read custom constraints at {cpath}: {e}")
+            else:
+                logger.warning(f"Custom constraint file not found: {custom_path}")
 
         # ---------------------------------------------------------
         # 2. Load File-Specific Constraints (Recursive Search)
@@ -530,6 +622,38 @@ class CodebaseLLMAgent:
                 elif self.header_context_builder and not file_includes:
                     logger.debug(f"    Header context skipped: no resolved includes for {rel_path}")
 
+                # 2c. Context Validation (per-chunk false positive reduction)
+                validation_context = ""
+                if self.context_validator:
+                    try:
+                        val_report = self.context_validator.analyze_chunk(
+                            chunk_text, str(file_path), code_content, start_line
+                        )
+                        validation_context = val_report.format_summary(max_chars=800)
+                        if validation_context:
+                            logger.debug(
+                                f"    Validation context for chunk {chunk_idx+1}: "
+                                f"{len(validation_context)} chars, "
+                                f"{len(val_report.validations)} symbols checked"
+                            )
+                    except Exception as cv_err:
+                        logger.debug(f"    Context validation failed: {cv_err}")
+
+                # 2d. Call Stack Context (cross-function call chain tracing)
+                call_stack_context = ""
+                if self.call_stack_analyzer:
+                    try:
+                        call_stack_context = self.call_stack_analyzer.analyze_chunk(
+                            chunk_text, str(file_path), code_content, start_line
+                        )
+                        if call_stack_context:
+                            logger.debug(
+                                f"    Call stack context for chunk {chunk_idx+1}: "
+                                f"{len(call_stack_context)} chars injected"
+                            )
+                    except Exception as csa_err:
+                        logger.debug(f"    Call stack analysis failed: {csa_err}")
+
                 # 3. Context Construction (Previous Chunk Tail + Dependencies + Header Defs)
                 context_header = ""
                 if prev_chunk_tail:
@@ -548,6 +672,16 @@ class CodebaseLLMAgent:
                 if header_context:
                     context_header += (
                         f"\n{header_context}\n"
+                    )
+
+                if validation_context:
+                    context_header += (
+                        f"\n{validation_context}\n"
+                    )
+
+                if call_stack_context:
+                    context_header += (
+                        f"\n{call_stack_context}\n"
                     )
 
                 final_chunk_text = (

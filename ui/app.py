@@ -125,6 +125,7 @@ _DEFAULTS = {
     "use_ccls": False,
     "exclude_dirs": "",
     "exclude_globs": "",
+    "custom_constraints": "",
     "file_to_fix": None,
     # Pipeline state
     "analysis_in_progress": False,
@@ -519,6 +520,12 @@ def page_analyze():
                     help="e.g., */test/*, moc_*.cpp, *_autogen/*",
                 )
                 st.session_state["exclude_globs"] = exclude_globs
+                custom_constraints = st.text_input(
+                    "Custom Constraint Files (comma-separated .md paths)",
+                    value="",
+                    help="e.g., my_rules.md, /abs/path/extra_constraints.md",
+                )
+                st.session_state["custom_constraints"] = custom_constraints
 
         output_dir = st_tools.folder_browser(
             label="Output Directory",
@@ -628,6 +635,11 @@ def page_analyze():
                 "batch_size": st.session_state.get("batch_size", 25),
                 "exclude_dirs": exclude,
                 "exclude_globs": exclude_globs,
+                "custom_constraints": [
+                    c.strip()
+                    for c in st.session_state.get("custom_constraints", "").split(",")
+                    if c.strip()
+                ],
                 "debug_mode": st.session_state.get("debug_mode", False),
                 "file_to_fix": st.session_state.get("file_to_fix"),
             }
@@ -1928,6 +1940,45 @@ def page_constraints_generator():
         st.warning(f"Template file not found: `{_TEMPLATE_PATH}`")
     if not generator_prompt_text:
         st.warning(f"Generator prompt not found: `{_PROMPT_PATH}`")
+
+    # ── Codebase-Wide Auto-Generation ─────────────────────────────────────
+    with st.expander("🔬 Auto-Generate Codebase Constraints (scans all symbols)", expanded=False):
+        st.caption(
+            "Scans the entire codebase for enums, structs, macros, bit fields, "
+            "and helper functions, then generates a `codebase_constraints.md` "
+            "file with IGNORE rules for common false positives."
+        )
+        codebase_path_for_gen = st.session_state.get("codebase_path", "")
+        if codebase_path_for_gen and os.path.isdir(codebase_path_for_gen):
+            if st.button("🔬 Generate Codebase Constraints", key="auto_gen_codebase_btn"):
+                with st.spinner("Scanning codebase for symbols..."):
+                    try:
+                        from agents.constraints.codebase_constraint_generator import generate_constraints
+                        md_text = generate_constraints(
+                            codebase_path=codebase_path_for_gen,
+                            exclude_dirs=[d.strip() for d in st.session_state.get("exclude_dirs", "").split(",") if d.strip()],
+                            exclude_globs=[g.strip() for g in st.session_state.get("exclude_globs", "").split(",") if g.strip()],
+                        )
+                        # Save to constraints folder
+                        save_path = os.path.join(_CONSTRAINTS_DIR, "codebase_constraints.md")
+                        os.makedirs(_CONSTRAINTS_DIR, exist_ok=True)
+                        with open(save_path, "w", encoding="utf-8") as f:
+                            f.write(md_text)
+                        st.success(f"Generated `codebase_constraints.md` ({md_text.count(chr(10)) + 1} lines)")
+                        st.download_button(
+                            "📥 Download codebase_constraints.md",
+                            data=md_text,
+                            file_name="codebase_constraints.md",
+                            mime="text/markdown",
+                            key="dl_codebase_constraints",
+                        )
+                    except Exception as e:
+                        st.error(f"Generation failed: {e}")
+                        logger.error("Codebase constraint generation failed", exc_info=True)
+        else:
+            st.info("Set a codebase path in the Analyze tab first.")
+
+    st.divider()
 
     # ── Section 1: Source File ────────────────────────────────────────────
     st.markdown(

@@ -322,6 +322,14 @@ Examples:
     parser.add_argument("--batch-size", type=int, default=25)
     parser.add_argument("--exclude-dirs", nargs="*", default=[])
     parser.add_argument("--exclude-globs", nargs="*", default=[])
+    parser.add_argument(
+        "--generate-constraints", action="store_true",
+        help="Auto-generate codebase_constraints.md from symbols and exit."
+    )
+    parser.add_argument(
+        "--include-custom-constraints", nargs="*", default=[],
+        help="Additional custom constraint .md files to include in the analysis."
+    )
 
     # Memory options
     parser.add_argument("--memory-limit", type=int, default=3000)
@@ -1241,6 +1249,27 @@ def main():
         if opts["exclude_globs"]:
             console.print(f"[dim]Exclude globs: {opts['exclude_globs']}[/dim]")
 
+        # ── Generate constraints mode (standalone, then exit) ─────────────
+        if opts.get("generate_constraints"):
+            try:
+                from agents.constraints.codebase_constraint_generator import generate_constraints
+                console.print("[bold blue]Generating codebase constraints...[/bold blue]")
+                md_text = generate_constraints(
+                    codebase_path=opts["codebase_path"],
+                    exclude_dirs=opts.get("exclude_dirs"),
+                    exclude_globs=opts.get("exclude_globs"),
+                )
+                out_path = os.path.join("agents", "constraints", "codebase_constraints.md")
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(md_text)
+                console.print(f"[green]✓ Constraints written to: {out_path}[/green]")
+                console.print(f"[dim]  Lines: {md_text.count(chr(10)) + 1}[/dim]")
+            except Exception as e:
+                console.print(f"[red]Constraint generation failed: {e}[/red]")
+                sys.exit(1)
+            sys.exit(0)
+
         # ── Setup debug.log file handler ─────────────────────────────────
         # Always write DEBUG-level messages to {out_dir}/debug.log so the user
         # can inspect CCLS context, prompt dumps, and other diagnostics even
@@ -1387,6 +1416,7 @@ def main():
                     use_ccls=opts.get("use_ccls", False),
                     file_to_fix=opts.get("file_to_fix"),
                     hitl_context=hitl_context,
+                    custom_constraints=opts.get("include_custom_constraints", []),
                 )
 
                 # Determine output filename

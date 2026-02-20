@@ -366,6 +366,7 @@ def run_analysis_background(
                 use_ccls=config.get("use_ccls", False),
                 file_to_fix=config.get("file_to_fix"),
                 hitl_context=hitl_context,
+                custom_constraints=config.get("custom_constraints", []),
             )
 
             phase_statuses[1] = "completed"

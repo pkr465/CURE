@@ -65,9 +65,61 @@ _FOR_LOOP_RE = re.compile(
 # Regex: modulo bound  idx % SIZE
 _MODULO_RE = re.compile(r'\b(\w+)\s*%\s*(\w+)\b')
 
-# Regex: static function detection
+# Regex: macro constant (ALL_CAPS or ALL_CAPS_123)  used as array bound
+_MACRO_CONST_RE = re.compile(r'^[A-Z][A-Z0-9_]{2,}$')
+
+# Regex: sizeof / ARRAY_SIZE bound   arr[sizeof(buf)]  or  arr[ARRAY_SIZE(arr)]
+_SIZEOF_BOUND_RE = re.compile(
+    r'\b(?:sizeof|ARRAY_SIZE|NELEMS|countof|__COUNTOF|nitems)\s*\(\s*(\w+)',
+)
+
+# Regex: switch(var) { case ... }  — implies var is bounded by case labels
+_SWITCH_RE = re.compile(r'switch\s*\(\s*(\w+)\s*\)')
+
+# Regex: kernel error checking macros
+_ERR_CHECK_FUNCS = {
+    "IS_ERR", "IS_ERR_OR_NULL", "PTR_ERR", "ERR_PTR",
+    "IS_ERR_VALUE", "PTR_ERR_OR_ZERO",
+}
+_ERR_CHECK_RE = re.compile(
+    r'(?:' + '|'.join(re.escape(f) for f in _ERR_CHECK_FUNCS) + r')\s*\(\s*(\w+)\s*\)',
+)
+
+# Regex: (void)func(...)  — intentional discard of return value
+_VOID_CAST_RE = re.compile(r'\(\s*void\s*\)\s*(\w+)\s*\(')
+
+# Regex: ternary inline check   var ? use : fallback
+_TERNARY_CHECK_RE = re.compile(r'\b(\w+)\s*\?\s*\S')
+
+# Regex: assert-like macros   BUG_ON(!ptr), WARN_ON(!ptr), assert(ptr)
+_ASSERT_MACRO_RE = re.compile(
+    r'(?:BUG_ON|WARN_ON|WARN_ON_ONCE|assert|Assert|QDF_ASSERT|QDF_BUG)\s*\(\s*!?\s*(\w+)',
+)
+
+# Regex: negative error return  if (ret < 0) or if (ret != 0)
+_NEG_ERR_CHECK_RE = re.compile(
+    r'if\s*\([^)]*\b(\w+)\s*(?:<\s*0|!=\s*0|==\s*-\w+)\s*\)',
+)
+
+# Regex: clamp / min / max bound   min(idx, MAX)  clamp(val, 0, MAX)
+# Captures the full argument list so we can check if the index appears anywhere inside
+_CLAMP_RE = re.compile(
+    r'\b(?:min|max|clamp|min_t|max_t)\s*\(([^)]+)\)',
+)
+
+# Regex: static function detection (single-line — kept for fast path)
 _STATIC_FUNC_RE = re.compile(
     r'^\s*static\s+[\w*\s]+\s+(\w+)\s*\(([^)]*)\)\s*\{',
+    re.MULTILINE,
+)
+
+# Regex: multi-line function signature detection
+# Handles signatures split across lines, e.g.:
+#   static int foo(struct bar *baz,
+#                  int qux)
+#   {
+_FUNC_SIG_MULTILINE_RE = re.compile(
+    r'^\s*(static\s+)?[\w*\s]+\s+(\w+)\s*\(([\s\S]*?)\)\s*\{',
     re.MULTILINE,
 )
 
@@ -79,7 +131,7 @@ _ALLOC_ASSIGN_RE = re.compile(
 # Regex: chained dereference  a->b->c
 _CHAIN_RE = re.compile(r'\b(\w+)(?:\s*->\s*\w+){2,}')
 
-# C keywords to exclude from identifier extraction
+# C keywords and common macros to exclude from identifier extraction
 _C_KEYWORDS = {
     "auto", "break", "case", "char", "const", "continue", "default", "do",
     "double", "else", "enum", "extern", "float", "for", "goto", "if",
@@ -88,6 +140,15 @@ _C_KEYWORDS = {
     "void", "volatile", "while", "NULL", "nullptr", "true", "false",
     "bool", "size_t", "uint8_t", "uint16_t", "uint32_t", "uint64_t",
     "int8_t", "int16_t", "int32_t", "int64_t",
+    # Common C macros / builtins that look like function calls
+    "min", "max", "clamp", "min_t", "max_t", "abs",
+    "likely", "unlikely", "ARRAY_SIZE", "NELEMS", "container_of",
+    "offsetof", "WARN_ON", "WARN_ON_ONCE", "BUG_ON",
+    "IS_ERR", "IS_ERR_OR_NULL", "PTR_ERR", "ERR_PTR",
+    "pr_err", "pr_warn", "pr_info", "pr_debug",
+    "printk", "dev_err", "dev_warn", "dev_info", "dev_dbg",
+    "memset", "memcpy", "memmove", "memcmp", "strlen", "strcmp",
+    "strncmp", "strncpy", "strlcpy", "strlcat", "snprintf",
 }
 
 
@@ -99,7 +160,7 @@ _C_KEYWORDS = {
 class ValidationResult:
     symbol_name: str
     issue_type: str        # null_deref, bounds_check, return_check, chained_deref
-    status: str            # VALIDATED, NOT_CHECKED, LOCALLY_ALLOCATED, BOUNDED
+    status: str            # VALIDATED, CALLER_CHECKED, NOT_CHECKED, LOCALLY_ALLOCATED, BOUNDED
     confidence: str        # HIGH, MEDIUM, LOW
     location: str          # Where the validation happens
     reasoning: str
@@ -210,18 +271,27 @@ class PointerValidator:
                 recommendation="IGNORE",
             )
 
-        # 3. Static function parameter — upstream responsibility
+        # 3. Function parameter — caller responsibility
         func_info = self._get_enclosing_function(chunk_text)
         if func_info:
-            func_name, params, is_static = func_info
-            if is_static and ptr_name in params:
-                return ValidationResult(
-                    symbol_name=ptr_name, issue_type="null_deref",
-                    status="VALIDATED", confidence="MEDIUM",
-                    location=f"param of static {func_name}() — caller validates",
-                    reasoning="Static/internal function; caller responsible for validation",
-                    recommendation="IGNORE",
-                )
+            func_name, param_names, is_static = func_info
+            if ptr_name in param_names:
+                if is_static:
+                    return ValidationResult(
+                        symbol_name=ptr_name, issue_type="null_deref",
+                        status="CALLER_CHECKED", confidence="MEDIUM",
+                        location=f"param of static {func_name}() — caller validates",
+                        reasoning="Static/internal function; caller responsible for validation",
+                        recommendation="IGNORE",
+                    )
+                else:
+                    return ValidationResult(
+                        symbol_name=ptr_name, issue_type="null_deref",
+                        status="CALLER_CHECKED", confidence="LOW",
+                        location=f"param of {func_name}() — caller expected to validate",
+                        reasoning="Function parameter; convention is caller validates before passing",
+                        recommendation="IGNORE",
+                    )
 
         # 4. Check earlier in file (before chunk)
         if self.file_content and self._has_null_check_in_file(ptr_name, chunk_start_line):
@@ -261,6 +331,12 @@ class PointerValidator:
             rf'if\s*\(\s*{escaped}\s*\)',
             rf'{escaped}\s*&&\s*{escaped}\s*->',
             rf'(?:unlikely|likely)\s*\(\s*!{escaped}\s*\)',
+            # Kernel error macros: IS_ERR(ptr), IS_ERR_OR_NULL(ptr)
+            rf'(?:IS_ERR|IS_ERR_OR_NULL|IS_ERR_VALUE)\s*\(\s*{escaped}\s*\)',
+            # Assert macros: BUG_ON(!ptr), WARN_ON(!ptr), assert(ptr)
+            rf'(?:BUG_ON|WARN_ON|WARN_ON_ONCE|assert|Assert|QDF_ASSERT|QDF_BUG)\s*\(\s*!?\s*{escaped}\s*\)',
+            # Ternary check: ptr ? use : fallback
+            rf'\b{escaped}\s*\?\s*\S',
         ]
         combined = "|".join(patterns)
         return bool(re.search(combined, chunk, re.IGNORECASE))
@@ -273,18 +349,54 @@ class PointerValidator:
         preceding = "\n".join(lines[start:before_line])
         return self._has_null_check(ptr_name, preceding)
 
-    def _get_enclosing_function(self, chunk: str) -> Optional[Tuple[str, str, bool]]:
-        """Extract enclosing function info: (name, params, is_static)."""
+    @staticmethod
+    def _extract_param_names(raw_params: str) -> Set[str]:
+        """
+        Extract parameter *names* from a C function signature string.
+
+        Handles multi-line params, pointer stars, const qualifiers, etc.
+        E.g. "struct foo *bar, const int baz, void *qux" → {"bar", "baz", "qux"}
+        """
+        names: Set[str] = set()
+        # Normalize whitespace (handles multi-line signatures)
+        cleaned = re.sub(r'\s+', ' ', raw_params.strip())
+        if not cleaned or cleaned == "void":
+            return names
+        for param in cleaned.split(","):
+            param = param.strip()
+            if not param or param == "...":
+                continue
+            # Remove array brackets:  int buf[MAX] → int buf
+            param = re.sub(r'\[.*?\]', '', param).strip()
+            # Last word-like token (after stripping *) is the parameter name
+            # e.g. "struct dp_pdev *pdev" → pdev
+            tokens = re.findall(r'[A-Za-z_]\w*', param)
+            if tokens:
+                candidate = tokens[-1]
+                if candidate not in _C_KEYWORDS:
+                    names.add(candidate)
+        return names
+
+    def _get_enclosing_function(self, chunk: str) -> Optional[Tuple[str, Set[str], bool]]:
+        """
+        Extract enclosing function info: (name, param_names_set, is_static).
+
+        Handles multi-line function signatures where parameters span
+        multiple lines before the opening brace.
+        """
+        # Try fast single-line static match first
         match = _STATIC_FUNC_RE.search(chunk)
         if match:
-            return (match.group(1), match.group(2), True)
-        # Also check non-static
-        non_static = re.search(
-            r'^\s*(?!static\b)([\w*\s]+)\s+(\w+)\s*\(([^)]*)\)\s*\{',
-            chunk, re.MULTILINE
-        )
-        if non_static:
-            return (non_static.group(2), non_static.group(3), False)
+            return (match.group(1), self._extract_param_names(match.group(2)), True)
+
+        # Fall back to multi-line regex
+        match = _FUNC_SIG_MULTILINE_RE.search(chunk)
+        if match:
+            is_static = match.group(1) is not None
+            func_name = match.group(2)
+            raw_params = match.group(3)
+            return (func_name, self._extract_param_names(raw_params), is_static)
+
         return None
 
 
@@ -299,6 +411,7 @@ class IndexValidator:
         idx_name: str,
         array_name: str,
         chunk_text: str,
+        func_info: Optional[Tuple[str, Set[str], bool]] = None,
     ) -> ValidationResult:
         """Determine if idx_name is bounded when used as array[idx]."""
 
@@ -338,7 +451,56 @@ class IndexValidator:
                     recommendation="IGNORE",
                 )
 
-        # 4. Check file-level for enum type hint
+        # 4. Macro constant as index: arr[MAX_QUEUES] — compile-time bounded
+        if _MACRO_CONST_RE.match(idx_name):
+            return ValidationResult(
+                symbol_name=idx_name, issue_type="bounds_check",
+                status="BOUNDED", confidence="HIGH",
+                location=f"macro constant: {idx_name}",
+                reasoning="Index is a compile-time macro constant",
+                recommendation="IGNORE",
+            )
+
+        # 5. sizeof / ARRAY_SIZE bound: idx assigned from sizeof(arr)
+        for m in _SIZEOF_BOUND_RE.finditer(chunk_text):
+            # Check if the sizeof result feeds into the index
+            if re.search(
+                rf'\b{re.escape(idx_name)}\s*(?:=|<|<=)\s*(?:sizeof|ARRAY_SIZE|NELEMS)\s*\(',
+                chunk_text,
+            ):
+                return ValidationResult(
+                    symbol_name=idx_name, issue_type="bounds_check",
+                    status="BOUNDED", confidence="HIGH",
+                    location=f"sizeof/ARRAY_SIZE bound for {idx_name}",
+                    reasoning="Index is bounded by sizeof or ARRAY_SIZE",
+                    recommendation="IGNORE",
+                )
+
+        # 6. clamp/min/max bound: idx = min(idx, MAX)
+        for m in _CLAMP_RE.finditer(chunk_text):
+            args_str = m.group(1)
+            # Check if idx_name appears as a word inside the argument list
+            if re.search(rf'\b{re.escape(idx_name)}\b', args_str):
+                return ValidationResult(
+                    symbol_name=idx_name, issue_type="bounds_check",
+                    status="BOUNDED", confidence="HIGH",
+                    location=f"clamp/min/max bound for {idx_name}",
+                    reasoning="Index is bounded by clamp/min/max operation",
+                    recommendation="IGNORE",
+                )
+
+        # 7. switch(idx) — index is bounded by case labels
+        for m in _SWITCH_RE.finditer(chunk_text):
+            if m.group(1) == idx_name:
+                return ValidationResult(
+                    symbol_name=idx_name, issue_type="bounds_check",
+                    status="BOUNDED", confidence="MEDIUM",
+                    location=f"switch-case on {idx_name}",
+                    reasoning="Index is dispatched via switch — each case handles a specific value",
+                    recommendation="IGNORE",
+                )
+
+        # 8. Check file-level for enum type hint
         if self.file_content:
             enum_match = re.search(
                 rf'enum\s+(\w+)\s+{re.escape(idx_name)}\b',
@@ -353,7 +515,32 @@ class IndexValidator:
                     recommendation="IGNORE",
                 )
 
-        # 5. Default — not checked
+        # 9. Function parameter — caller is expected to pass valid index
+        if func_info:
+            func_name, param_names, is_static = func_info
+            if idx_name in param_names:
+                conf = "MEDIUM" if is_static else "LOW"
+                qualifier = "static " if is_static else ""
+                return ValidationResult(
+                    symbol_name=idx_name, issue_type="bounds_check",
+                    status="CALLER_CHECKED", confidence=conf,
+                    location=f"param of {qualifier}{func_name}() — caller bounds",
+                    reasoning="Index is a function parameter; caller expected to pass bounded value",
+                    recommendation="IGNORE",
+                )
+
+        # 10. Check earlier in file for bounds comparison
+        if self.file_content:
+            if self._has_bounds_check_in_file(idx_name, chunk_text):
+                return ValidationResult(
+                    symbol_name=idx_name, issue_type="bounds_check",
+                    status="BOUNDED", confidence="MEDIUM",
+                    location="bounds-checked earlier in file",
+                    reasoning="Comparison/loop bound found in preceding code",
+                    recommendation="IGNORE",
+                )
+
+        # 11. Default — not checked
         return ValidationResult(
             symbol_name=idx_name, issue_type="bounds_check",
             status="NOT_CHECKED", confidence="LOW",
@@ -361,6 +548,19 @@ class IndexValidator:
             reasoning="No comparison/loop/modulo found bounding this index",
             recommendation="FLAG",
         )
+
+    def _has_bounds_check_in_file(self, idx_name: str, chunk_text: str) -> bool:
+        """Check if a bounds check exists in the file content before the chunk."""
+        # Look for comparison patterns in the full file content
+        escaped = re.escape(idx_name)
+        patterns = [
+            rf'(?:if|while|for)\s*\([^)]*\b{escaped}\s*(?:<|<=|>|>=)\s*\w+',
+            rf'for\s*\([^;]*;\s*{escaped}\s*(?:<|<=)\s*\w+\s*;',
+            rf'\b{escaped}\s*%\s*\w+',
+            rf'\b(?:min|max|clamp|min_t|max_t)\s*\([^)]*\b{escaped}\b',
+        ]
+        combined = "|".join(patterns)
+        return bool(re.search(combined, self.file_content))
 
 
 class ReturnValueValidator:
@@ -383,6 +583,7 @@ class ReturnValueValidator:
             rf'if\s*\(\s*{escaped}\s*==\s*(?:NULL|0|nullptr)\s*\)',
             rf'if\s*\(\s*{escaped}\s*!=\s*(?:NULL|0|nullptr)\s*\)',
             rf'if\s*\(\s*{escaped}\s*<\s*0\s*\)',
+            rf'if\s*\(\s*{escaped}\s*!=\s*0\s*\)',
             rf'{escaped}\s*&&\s*{escaped}\s*->',
         ]
         for pat in patterns:
@@ -410,7 +611,68 @@ class ReturnValueValidator:
                 recommendation="IGNORE",
             )
 
-        # 3. Default — not checked
+        # 3. IS_ERR / IS_ERR_OR_NULL kernel macro check
+        err_pat = re.compile(
+            r'(?:IS_ERR|IS_ERR_OR_NULL|IS_ERR_VALUE|PTR_ERR_OR_ZERO)\s*\(\s*'
+            + escaped + r'\s*\)',
+        )
+        if err_pat.search(chunk_text):
+            return ValidationResult(
+                symbol_name=f"{func_name}()", issue_type="return_check",
+                status="VALIDATED", confidence="HIGH",
+                location=f"IS_ERR/IS_ERR_OR_NULL check for {var_name}",
+                reasoning="Return value checked via kernel error macro",
+                recommendation="IGNORE",
+            )
+
+        # 4. Negative error return: if (ret < 0)  or  if (ret == -EINVAL)
+        if _NEG_ERR_CHECK_RE.search(chunk_text):
+            for m in _NEG_ERR_CHECK_RE.finditer(chunk_text):
+                if m.group(1) == var_name:
+                    return ValidationResult(
+                        symbol_name=f"{func_name}()", issue_type="return_check",
+                        status="VALIDATED", confidence="HIGH",
+                        location=f"negative error check for {var_name}",
+                        reasoning="Return value checked against negative error codes",
+                        recommendation="IGNORE",
+                    )
+
+        # 5. Assert-like macro:  BUG_ON(!ret), WARN_ON(!ret), assert(ret)
+        for m in _ASSERT_MACRO_RE.finditer(chunk_text):
+            if m.group(1) == var_name:
+                return ValidationResult(
+                    symbol_name=f"{func_name}()", issue_type="return_check",
+                    status="VALIDATED", confidence="MEDIUM",
+                    location=f"assert/BUG_ON check for {var_name}",
+                    reasoning="Return value guarded by assert-like macro",
+                    recommendation="IGNORE",
+                )
+
+        # 6. Ternary check:  var ? use_it : fallback
+        ternary_pat = re.compile(rf'\b{escaped}\s*\?\s*\S')
+        if ternary_pat.search(chunk_text):
+            return ValidationResult(
+                symbol_name=f"{func_name}()", issue_type="return_check",
+                status="VALIDATED", confidence="MEDIUM",
+                location=f"ternary check for {var_name}",
+                reasoning="Return value used in ternary expression (implicit check)",
+                recommendation="IGNORE",
+            )
+
+        # 7. (void)func(...) — intentional discard
+        void_cast = re.compile(
+            rf'\(\s*void\s*\)\s*{re.escape(func_name)}\s*\(', re.IGNORECASE
+        )
+        if void_cast.search(chunk_text):
+            return ValidationResult(
+                symbol_name=f"{func_name}()", issue_type="return_check",
+                status="VALIDATED", confidence="HIGH",
+                location=f"(void) cast — intentional discard",
+                reasoning="Return value intentionally discarded via (void) cast",
+                recommendation="IGNORE",
+            )
+
+        # 8. Default — not checked
         return ValidationResult(
             symbol_name=f"{func_name}()", issue_type="return_check",
             status="NOT_CHECKED", confidence="MEDIUM",
@@ -431,15 +693,15 @@ class ChainedDerefValidator:
         ptr_validator: PointerValidator,
         chunk_start_line: int,
     ) -> ValidationResult:
-        """If root is validated, entire chain is safe."""
+        """If root is validated or caller-checked, entire chain is safe."""
 
         root_result = ptr_validator.trace(chain_root, chunk_text, chunk_start_line)
 
-        if root_result.status == "VALIDATED":
+        if root_result.status in ("VALIDATED", "CALLER_CHECKED"):
             return ValidationResult(
                 symbol_name=full_chain, issue_type="chained_deref",
                 status="VALIDATED", confidence=root_result.confidence,
-                location=f"root `{chain_root}` validated — chain inherits",
+                location=f"root `{chain_root}` {root_result.status.lower()} — chain inherits",
                 reasoning="Root pointer validated; chained members inherit safety",
                 recommendation="IGNORE",
             )
@@ -517,42 +779,49 @@ class ContextValidator:
         ret_validator = ReturnValueValidator()
         chain_validator = ChainedDerefValidator()
 
+        # ── Strip comments before extracting identifiers ──
+        _stripped = re.sub(r'//[^\n]*', '', chunk_text)        # single-line
+        _stripped = re.sub(r'/\*.*?\*/', '', _stripped, flags=re.DOTALL)  # block
+
         # ── Extract potential issues from chunk ──
 
         # 1. Pointer dereferences: ptr->field
         deref_ptrs: Set[str] = set()
-        for m in _DEREF_RE.finditer(chunk_text):
+        for m in _DEREF_RE.finditer(_stripped):
             ptr = m.group(1)
             if ptr not in _C_KEYWORDS and ptr not in deref_ptrs:
                 deref_ptrs.add(ptr)
 
         # 2. Star dereferences: *ptr
-        for m in _STAR_DEREF_RE.finditer(chunk_text):
+        for m in _STAR_DEREF_RE.finditer(_stripped):
             ptr = m.group(1)
             if ptr not in _C_KEYWORDS:
                 deref_ptrs.add(ptr)
 
         # 3. Array accesses: arr[idx]
         array_accesses: List[Tuple[str, str]] = []
-        for m in _ARRAY_ACCESS_RE.finditer(chunk_text):
+        for m in _ARRAY_ACCESS_RE.finditer(_stripped):
             arr, idx = m.group(1), m.group(2)
             if arr not in _C_KEYWORDS and idx not in _C_KEYWORDS:
                 array_accesses.append((arr, idx))
 
         # 4. Function call return values: var = func(...)
         func_returns: List[Tuple[str, str]] = []
-        for m in _FUNC_CALL_RE.finditer(chunk_text):
+        for m in _FUNC_CALL_RE.finditer(_stripped):
             var, func = m.group(1), m.group(2)
             if var not in _C_KEYWORDS and func not in _C_KEYWORDS:
                 func_returns.append((var, func))
 
         # 5. Chained dereferences: a->b->c
         chain_roots: Dict[str, str] = {}
-        for m in _CHAIN_RE.finditer(chunk_text):
+        for m in _CHAIN_RE.finditer(_stripped):
             full = m.group(0)
             root = m.group(1)
             if root not in _C_KEYWORDS:
                 chain_roots[root] = full
+
+        # ── Pre-extract enclosing function info (shared by ptr + idx validators) ──
+        func_info = ptr_validator._get_enclosing_function(chunk_text)
 
         # ── Validate each potential issue ──
 
@@ -571,7 +840,7 @@ class ContextValidator:
             seen_indices.add(idx)
             key = f"idx:{idx}"
             if key not in report.validations:
-                result = idx_validator.trace(idx, arr, chunk_text)
+                result = idx_validator.trace(idx, arr, chunk_text, func_info=func_info)
                 report.validations[key] = result
 
         # Return value validations
@@ -587,11 +856,11 @@ class ContextValidator:
             if key not in report.validations:
                 # Skip if already validated as a pointer
                 ptr_key = f"ptr:{root}"
-                if ptr_key in report.validations and report.validations[ptr_key].status == "VALIDATED":
+                if ptr_key in report.validations and report.validations[ptr_key].status in ("VALIDATED", "CALLER_CHECKED"):
                     result = ValidationResult(
                         symbol_name=chain, issue_type="chained_deref",
                         status="VALIDATED", confidence=report.validations[ptr_key].confidence,
-                        location=f"root `{root}` validated — chain inherits",
+                        location=f"root `{root}` {report.validations[ptr_key].status.lower()} — chain inherits",
                         reasoning="Root pointer validated; chained members inherit safety",
                         recommendation="IGNORE",
                     )
@@ -603,7 +872,7 @@ class ContextValidator:
 
         # Log summary
         total = len(report.validations)
-        validated = sum(1 for v in report.validations.values() if v.status in ("VALIDATED", "BOUNDED"))
+        validated = sum(1 for v in report.validations.values() if v.status in ("VALIDATED", "CALLER_CHECKED", "BOUNDED"))
         logger.debug(
             f"Context validation for {file_path} lines {start_line}+: "
             f"{validated}/{total} symbols pre-validated"

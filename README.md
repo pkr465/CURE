@@ -870,30 +870,42 @@ Paths can be absolute or relative (resolved against CWD first, then `agents/cons
 
 ### Tool 2: Context Validator (Per-Chunk Pre-Analysis)
 
-`agents/context/context_validator.py` runs inline during LLM analysis. For each code chunk, it traces pointer validations, array bounds, return-value checks, and chained dereferences using regex heuristics, then injects a compact validation summary into the prompt before the LLM sees the code.
+`agents/context/context_validator.py` runs inline during LLM analysis. For each code chunk, it strips comments, traces pointer validations, array bounds, return-value checks, and chained dereferences using regex heuristics, then injects a compact validation summary into the prompt before the LLM sees the code. Multi-line function signatures are fully supported.
+
+**Statuses:** `VALIDATED` (explicit check found), `CALLER_CHECKED` (function parameter — caller responsible), `BOUNDED` (compile-time or runtime bound), `LOCALLY_ALLOCATED` (dynamic alloc — must be checked), `NOT_CHECKED` (no validation found — FLAG).
 
 **What it traces:**
 
 | Check Type | Heuristics |
 |:-----------|:-----------|
-| Pointer null-checks | Local allocation detection (FLAG), null-check in scope (IGNORE), static function parameter (IGNORE — caller validates), struct member chain inheritance |
-| Array bounds | Loop-bound detection (`for i < MAX`), comparison (`if idx < LIMIT`), modulo (`idx % SIZE`), enum type inference |
-| Return values | Immediate check (`if (!ptr)`), guard pattern (`ptr = alloc(); if (!ptr) return`), function name heuristics |
-| Chained dereferences | Root pointer validated → entire chain (`soc->pdev->ops->callback`) inherits IGNORE |
+| Pointer null-checks | Local allocation detection (FLAG), null-check in scope (IGNORE), `IS_ERR`/`IS_ERR_OR_NULL` kernel macros, `BUG_ON`/`WARN_ON`/`assert` macros, ternary check (`ptr ? ... : ...`), function parameter — both static and non-static (CALLER_CHECKED → IGNORE), struct member chain inheritance, file-level backward check |
+| Array bounds | Loop-bound (`for i < LIMIT`), explicit comparison (`if idx < MAX`), modulo (`idx % SIZE`), macro constant index (`arr[MAX_QUEUES]` — compile-time), `sizeof`/`ARRAY_SIZE`/`NELEMS` bound, `clamp`/`min`/`max` bound, `switch(idx)` case-bounded, enum type inference, function parameter as index (CALLER_CHECKED → IGNORE), file-level backward bounds check |
+| Return values | Immediate null/error check, guard pattern, `IS_ERR`/`IS_ERR_OR_NULL` kernel macros, negative error codes (`ret < 0`, `ret != 0`, `ret == -EINVAL`), `BUG_ON`/`WARN_ON`/`assert` macros, ternary inline check, `(void)func()` intentional discard |
+| Chained dereferences | Root pointer VALIDATED or CALLER_CHECKED → entire chain (`soc->pdev->ops->callback`) inherits IGNORE |
+
+**Comment stripping:** Single-line (`//`) and block (`/* */`) comments are stripped before identifier extraction to prevent false positives from comment text.
+
+**Keyword/macro exclusion:** Common C macros (`min`, `max`, `IS_ERR`, `memcpy`, `printk`, `snprintf`, etc.) are excluded from pointer/return-value analysis to prevent false flags on macro calls.
 
 **Per-chunk output injected into prompt:**
 
 ```c
 // ── CONTEXT VALIDATION (pre-analysis) ──────────────
 // Pointers:
-//   soc              -> VALIDATED (param of static dp_rx_process() — caller validates)
-//   buf              -> LOCALLY_ALLOCATED (kzalloc line 155) — FLAG if unchecked
+//   soc              -> CALLER_CHECKED (param of static dp_peer_setup() — caller validates)
+//   pdev             -> CALLER_CHECKED (param of static dp_peer_setup() — caller validates)
 //   peer             -> VALIDATED (null-checked in current chunk)
+//   buf              -> LOCALLY_ALLOCATED (kzalloc line 155) — FLAG if unchecked
 // Array Bounds:
-//   queue_id         -> BOUNDED (enum dp_queue_type, MAX=8)
-//   ring_idx         -> BOUNDED (compared < MAX_RINGS at line 148)
-// Returns:
-//   find_peer()      -> VALIDATED (checked at line 160)
+//   MAX_RINGS        -> BOUNDED (macro constant: MAX_RINGS)
+//   i                -> BOUNDED (comparison: i < ARRAY_SIZE)
+//   type             -> BOUNDED (switch-case on type)
+//   ring_idx         -> BOUNDED (clamp/min/max bound for ring_idx)
+// Return Values:
+//   dp_peer_alloc()  -> VALIDATED (IS_ERR/IS_ERR_OR_NULL check for peer)
+//   dp_peer_register() -> VALIDATED (assert/BUG_ON check for ret)
+// Chained Derefs:
+//   soc->pdev->ops   -> VALIDATED (root `soc` caller_checked — chain inherits)
 // ── END VALIDATION ─────────────────────────────────
 ```
 

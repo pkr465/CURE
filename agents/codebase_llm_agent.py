@@ -51,7 +51,7 @@ except ImportError:
 
 # Context validator (per-chunk false positive reduction)
 try:
-    from agents.constraints.context_validator import ContextValidator
+    from agents.context.context_validator import ContextValidator
     CONTEXT_VALIDATOR_AVAILABLE = True
 except ImportError:
     ContextValidator = None
@@ -245,6 +245,7 @@ class CodebaseLLMAgent:
         self.call_stack_analyzer = None
         if CALL_STACK_ANALYZER_AVAILABLE:
             try:
+                _csa_cache_dir = os.path.join(self.output_dir, ".cache")
                 self.call_stack_analyzer = StaticCallStackAnalyzer(
                     codebase_path=str(self.codebase_path),
                     exclude_dirs=list(self.exclude_dirs),
@@ -254,6 +255,7 @@ class CodebaseLLMAgent:
                     ccls_navigator=None,  # Updated after CCLS indexing
                     max_trace_depth=3,
                     max_context_chars=1200,
+                    cache_dir=_csa_cache_dir,
                 )
                 logger.info(
                     f"[*] Call Stack Analyzer ENABLED "

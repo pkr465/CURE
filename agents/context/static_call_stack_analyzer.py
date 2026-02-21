@@ -17,8 +17,10 @@ Author: Pavan R
 """
 
 import fnmatch
+import hashlib
 import logging
 import os
+import pickle
 import re
 import time
 from dataclasses import dataclass, field
@@ -361,6 +363,49 @@ class CodebaseIndex:
             f"enums={len(self.enum_ranges)}"
         )
 
+    # ── Persistence ──────────────────────────────────────────────────
+    _CACHE_VERSION = 1  # Bump when data-class layout changes
+
+    def save(self, path: str):
+        """Serialize the index to a pickle file."""
+        payload = {
+            "version": self._CACHE_VERSION,
+            "functions": self.functions,
+            "functions_by_name": self.functions_by_name,
+            "call_graph": self.call_graph,
+            "reverse_call_graph": self.reverse_call_graph,
+            "macro_values": self.macro_values,
+            "enum_ranges": self.enum_ranges,
+            "functions_by_file": self.functions_by_file,
+        }
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp, path)
+        logger.debug(f"[CallStackAnalyzer] Index saved to {path}")
+
+    @classmethod
+    def load(cls, path: str) -> Optional["CodebaseIndex"]:
+        """Deserialize an index from a pickle file, or return None on failure."""
+        try:
+            with open(path, "rb") as f:
+                payload = pickle.load(f)
+            if payload.get("version") != cls._CACHE_VERSION:
+                logger.info("[CallStackAnalyzer] Cache version mismatch — rebuilding")
+                return None
+            idx = cls()
+            idx.functions = payload["functions"]
+            idx.functions_by_name = payload["functions_by_name"]
+            idx.call_graph = payload["call_graph"]
+            idx.reverse_call_graph = payload["reverse_call_graph"]
+            idx.macro_values = payload["macro_values"]
+            idx.enum_ranges = payload["enum_ranges"]
+            idx.functions_by_file = payload["functions_by_file"]
+            return idx
+        except Exception as exc:
+            logger.debug(f"[CallStackAnalyzer] Cache load failed: {exc}")
+            return None
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  StaticCallStackAnalyzer — Main class
@@ -388,6 +433,7 @@ class StaticCallStackAnalyzer:
         ccls_navigator=None,
         max_trace_depth: int = 3,
         max_context_chars: int = 1200,
+        cache_dir: Optional[str] = None,
     ):
         self.codebase_path = Path(codebase_path)
         self.exclude_dirs = set(exclude_dirs or []) | _BUILTIN_EXCLUDE_DIRS
@@ -397,10 +443,89 @@ class StaticCallStackAnalyzer:
         self.ccls_navigator = ccls_navigator
         self.max_trace_depth = max_trace_depth
         self.max_context_chars = max_context_chars
+        self.cache_dir = Path(cache_dir) if cache_dir else None
 
-        # Build the codebase index
+        # Try loading from cache; rebuild only if stale or missing
         self.index = CodebaseIndex()
-        self._build_index()
+        cache_path = self._cache_path()
+        loaded = False
+        if cache_path:
+            fingerprint = self._codebase_fingerprint()
+            cached_idx = CodebaseIndex.load(str(cache_path))
+            if cached_idx is not None:
+                # Validate fingerprint stored alongside the index
+                fp_file = str(cache_path) + ".fp"
+                stored_fp = ""
+                try:
+                    with open(fp_file, "r") as f:
+                        stored_fp = f.read().strip()
+                except Exception:
+                    pass
+                if stored_fp == fingerprint:
+                    self.index = cached_idx
+                    loaded = True
+                    logger.info(
+                        f"[CallStackAnalyzer] Index loaded from cache — "
+                        f"{self.index.stats()}"
+                    )
+                else:
+                    logger.info("[CallStackAnalyzer] Cache fingerprint mismatch — rebuilding")
+
+        if not loaded:
+            self._build_index()
+            # Save to cache
+            if cache_path:
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    self.index.save(str(cache_path))
+                    fp_file = str(cache_path) + ".fp"
+                    with open(fp_file, "w") as f:
+                        f.write(self._codebase_fingerprint())
+                    logger.info(f"[CallStackAnalyzer] Index cached to {cache_path}")
+                except Exception as exc:
+                    logger.debug(f"[CallStackAnalyzer] Cache save failed: {exc}")
+
+    # ───────────────────────────────────────────────────────────────────────
+    #  Cache Helpers
+    # ───────────────────────────────────────────────────────────────────────
+
+    def _cache_path(self) -> Optional[Path]:
+        """Return the pickle cache path, or None if caching is disabled."""
+        if not self.cache_dir:
+            return None
+        return self.cache_dir / "call_stack_index.pkl"
+
+    def _codebase_fingerprint(self) -> str:
+        """
+        Cheap fingerprint of the codebase's C/C++ source files.
+
+        Hashes the sorted list of (relative_path, size, mtime_ns) tuples for
+        every C/C++ file that passes the exclude filters.  If any file is
+        added, removed, resized, or has a newer mtime the fingerprint changes,
+        triggering a rebuild on the next run.
+        """
+        entries: List[str] = []
+        for root, dirs, filenames in os.walk(self.codebase_path):
+            dirs[:] = [d for d in dirs if d not in self.exclude_dirs]
+            for fname in filenames:
+                ext = os.path.splitext(fname)[1].lower()
+                if ext not in C_EXTENSIONS:
+                    continue
+                fpath = os.path.join(root, fname)
+                try:
+                    rel = os.path.relpath(fpath, self.codebase_path)
+                except ValueError:
+                    continue
+                if any(fnmatch.fnmatch(rel.lower(), pat) for pat in self.exclude_globs):
+                    continue
+                try:
+                    st = os.stat(fpath)
+                    entries.append(f"{rel}|{st.st_size}|{st.st_mtime_ns}")
+                except OSError:
+                    pass
+        entries.sort()
+        h = hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest()[:24]
+        return h
 
     # ───────────────────────────────────────────────────────────────────────
     #  Index Building (Phase 1)

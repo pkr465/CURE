@@ -829,7 +829,7 @@ CURE includes two tools that automatically reduce false positives in LLM-based a
 
 ### Tool 1: Codebase Constraint Generator
 
-`agents/constraints/codebase_constraint_generator.py` scans the entire codebase and extracts enums, structs, macros, bit-field patterns, and helper/validator functions, then generates a `codebase_constraints.md` file with IGNORE rules for common false positive categories.
+`agents/context/codebase_constraint_generator.py` scans the entire codebase and extracts enums, structs, macros, bit-field patterns, and helper/validator functions, then generates a `codebase_constraints.md` file with IGNORE rules for common false positive categories.
 
 **What it generates:**
 
@@ -849,7 +849,7 @@ CURE includes two tools that automatically reduce false positives in LLM-based a
 python main.py --generate-constraints --codebase-path /path/to/src
 
 # Or run the script directly
-python agents/constraints/codebase_constraint_generator.py \
+python agents/context/codebase_constraint_generator.py \
   --codebase-path /path/to/src \
   --output agents/constraints/codebase_constraints.md \
   --exclude-dirs build,vendor
@@ -870,7 +870,7 @@ Paths can be absolute or relative (resolved against CWD first, then `agents/cons
 
 ### Tool 2: Context Validator (Per-Chunk Pre-Analysis)
 
-`agents/constraints/context_validator.py` runs inline during LLM analysis. For each code chunk, it traces pointer validations, array bounds, return-value checks, and chained dereferences using regex heuristics, then injects a compact validation summary into the prompt before the LLM sees the code.
+`agents/context/context_validator.py` runs inline during LLM analysis. For each code chunk, it traces pointer validations, array bounds, return-value checks, and chained dereferences using regex heuristics, then injects a compact validation summary into the prompt before the LLM sees the code.
 
 **What it traces:**
 
@@ -936,18 +936,18 @@ The analyzer works in two modes: regex-only (always available, no CCLS required)
 ### Files
 
 ```text
-agents/constraints/
+agents/context/
+├── __init__.py
+├── header_context_builder.py         # Include resolution, header parsing, context assembly
 ├── codebase_constraint_generator.py  # Tool 1: symbol extraction + constraint rule generation
 ├── context_validator.py              # Tool 2: per-chunk validation context builder
+└── static_call_stack_analyzer.py     # Tool 3: codebase-wide call chain tracing
+
+agents/constraints/
 ├── codebase_constraints.md           # Auto-generated output (after running Tool 1)
 ├── common_constraints.md             # Manual global rules
 ├── TEMPLATE_constraints.md           # Template for per-file constraints
 └── GENERATE_CONSTRAINTS_PROMPT.md    # LLM prompt for constraint generation
-
-agents/context/
-├── __init__.py
-├── header_context_builder.py         # Include resolution, header parsing, context assembly
-└── static_call_stack_analyzer.py     # Tool 3: codebase-wide call chain tracing
 ```
 
 Modified: `agents/codebase_llm_agent.py` (ContextValidator integration, `codebase_constraints.md` loading, custom constraint loading, StaticCallStackAnalyzer integration), `main.py` (`--generate-constraints` flag, `--include-custom-constraints` flag), `ui/app.py` (auto-generate button in Constraints tab, custom constraint file input), `ui/background_workers.py` (custom constraints wiring).

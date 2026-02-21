@@ -1057,6 +1057,7 @@ def _run_standalone_adapters(
     exclude_dirs: Optional[List[str]] = None,
     exclude_globs: Optional[List[str]] = None,
     generate_excel: bool = False,
+    file_to_fix: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run deep static analysis adapters independently.
@@ -1071,17 +1072,45 @@ def _run_standalone_adapters(
     :param exclude_dirs: Directories to exclude from scanning.
     :param exclude_globs: Glob patterns to exclude from scanning.
     :param generate_excel: If True, generate a standalone Excel report.
+    :param file_to_fix: If set, restrict adapter analysis to this single file.
     :return: Dict mapping adapter names to their result dicts.
     """
     from agents.core.file_processor import FileProcessor
 
-    # Build file cache from codebase
-    processor = FileProcessor(
-        codebase_path=codebase_path,
-        exclude_dirs=exclude_dirs or [],
-        exclude_globs=exclude_globs or [],
-    )
-    file_cache = processor.process_files()
+    # If file_to_fix is specified, build a single-file cache directly
+    # instead of scanning the entire codebase.
+    if file_to_fix:
+        target = Path(file_to_fix)
+        if not target.is_absolute():
+            target = Path(codebase_path) / target
+        target = target.resolve()
+        if target.exists() and target.is_file():
+            try:
+                source = target.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                source = ""
+            try:
+                rel = str(target.relative_to(Path(codebase_path).resolve()))
+            except ValueError:
+                rel = str(target)
+            file_cache = [{
+                "file_path": str(target),
+                "file_relative_path": rel,
+                "file_name": target.name,
+                "source": source,
+            }]
+            console.print(f"[blue]  📁 File cache: 1 file (--file-to-fix: {rel})[/blue]")
+        else:
+            console.print(f"[yellow]  ⚠ --file-to-fix target not found: {target}[/yellow]")
+            file_cache = []
+    else:
+        # Build file cache from full codebase
+        processor = FileProcessor(
+            codebase_path=codebase_path,
+            exclude_dirs=exclude_dirs or [],
+            exclude_globs=exclude_globs or [],
+        )
+        file_cache = processor.process_files()
     console.print(f"[blue]  📁 File cache: {len(file_cache)} files[/blue]")
 
     # Try to initialize CCLS
@@ -1252,7 +1281,7 @@ def main():
         # ── Generate constraints mode (standalone, then exit) ─────────────
         if opts.get("generate_constraints"):
             try:
-                from agents.constraints.codebase_constraint_generator import generate_constraints
+                from agents.context.codebase_constraint_generator import generate_constraints
                 console.print("[bold blue]Generating codebase constraints...[/bold blue]")
                 md_text = generate_constraints(
                     codebase_path=opts["codebase_path"],
@@ -1433,6 +1462,7 @@ def main():
                             output_dir=opts["out_dir"],
                             exclude_dirs=opts.get("exclude_dirs", []),
                             exclude_globs=opts.get("exclude_globs", []),
+                            file_to_fix=opts.get("file_to_fix"),
                         )
                         console.print("[green]✅ Adapter analysis complete — results will be merged into Excel.[/green]")
                     except Exception as adapter_err:

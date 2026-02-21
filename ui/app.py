@@ -1953,7 +1953,7 @@ def page_constraints_generator():
             if st.button("🔬 Generate Codebase Constraints", key="auto_gen_codebase_btn"):
                 with st.spinner("Scanning codebase for symbols..."):
                     try:
-                        from agents.constraints.codebase_constraint_generator import generate_constraints
+                        from agents.context.codebase_constraint_generator import generate_constraints
                         md_text = generate_constraints(
                             codebase_path=codebase_path_for_gen,
                             exclude_dirs=[d.strip() for d in st.session_state.get("exclude_dirs", "").split(",") if d.strip()],

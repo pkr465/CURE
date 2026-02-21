@@ -1367,6 +1367,9 @@ def main():
                     hitl_context=hitl_context,
                     enable_adapters=opts.get("enable_adapters", False),
                     verbose=opts.get("verbose", False),
+                    exclude_dirs=opts.get("exclude_dirs", []),
+                    exclude_globs=opts.get("exclude_globs", []),
+                    custom_constraints=opts.get("include_custom_constraints", []),
                 )
 
                 excel_path = os.path.join(opts.get("out_dir", "./out"), "detailed_code_review.xlsx")

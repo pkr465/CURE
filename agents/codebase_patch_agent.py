@@ -150,7 +150,10 @@ class CodebasePatchAgent:
         hitl_context: Optional[Any] = None,
         enable_adapters: bool = False,
         verbose: bool = False,
-        constraints_dir: str = "agents/constraints"
+        constraints_dir: str = "agents/constraints",
+        exclude_dirs: Optional[List[str]] = None,
+        exclude_globs: Optional[List[str]] = None,
+        custom_constraints: Optional[List[str]] = None,
     ) -> None:
         self.file_path = Path(file_path).resolve()
         self.patch_file = Path(patch_file).resolve()
@@ -161,6 +164,9 @@ class CodebasePatchAgent:
         self.hitl_context = hitl_context
         self.enable_adapters = enable_adapters
         self.verbose = verbose
+        self.exclude_dirs = exclude_dirs or []
+        self.exclude_globs = exclude_globs or []
+        self.custom_constraints = custom_constraints or []
 
         # Derive useful names
         self.filename = self.file_path.name
@@ -444,10 +450,13 @@ class CodebasePatchAgent:
                 output_dir=analysis_out,
                 config=self.config,
                 llm_tools=self.llm_tools,
+                exclude_dirs=self.exclude_dirs,
+                exclude_globs=self.exclude_globs,
                 max_files=1,
                 file_to_fix=filename,
                 hitl_context=self.hitl_context,
-                constraints_dir=str(self.constraints_dir) 
+                constraints_dir=str(self.constraints_dir),
+                custom_constraints=self.custom_constraints,
             )
 
             output_filename = f"patch_{label}_{self.filename_stem}.xlsx"
@@ -901,6 +910,22 @@ if __name__ == "__main__":
         help="Directory containing constraint files",
     )
     parser.add_argument(
+        "--exclude-dirs",
+        default="",
+        help="Comma-separated list of directories to exclude",
+    )
+    parser.add_argument(
+        "--exclude-globs",
+        default="",
+        help="Comma-separated glob patterns to exclude",
+    )
+    parser.add_argument(
+        "--include-custom-constraints",
+        nargs="*",
+        default=[],
+        help="Additional constraint .md files to load",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         default=False,
@@ -932,6 +957,9 @@ if __name__ == "__main__":
             print(f"WARNING: Could not initialise LLMTools: {e}")
 
     # Run agent
+    exclude_dirs = [d.strip() for d in args.exclude_dirs.split(",") if d.strip()]
+    exclude_globs = [g.strip() for g in args.exclude_globs.split(",") if g.strip()]
+
     agent = CodebasePatchAgent(
         file_path=args.file_path,
         patch_file=args.patch_file,
@@ -941,6 +969,9 @@ if __name__ == "__main__":
         enable_adapters=args.enable_adapters,
         verbose=args.verbose,
         constraints_dir=args.constraints_dir,
+        exclude_dirs=exclude_dirs,
+        exclude_globs=exclude_globs,
+        custom_constraints=args.include_custom_constraints,
     )
 
     result = agent.run_analysis(excel_path=args.excel_path)

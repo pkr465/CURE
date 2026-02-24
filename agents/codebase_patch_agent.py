@@ -156,10 +156,15 @@ class PatchFinding:
     severity: str
     category: str
     description: str
+    title: str = ""
+    confidence: str = ""
+    suggestion: str = ""
     code_before: str = ""
     code_after: str = ""
     introduced_by_patch: bool = True
     issue_source: str = "patch"
+    feedback: str = ""
+    constraints: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +309,13 @@ class CodebasePatchAgent:
             self.logger.error(f"Failed to read patch file: {exc}")
             return {"status": "error", "message": str(exc)}
 
+        # -- Strip BOM and normalize line endings ---------------------------
+        # BOM prefix (\ufeff) causes ^@@ regex to fail — strip it.
+        if patch_content.startswith("\ufeff"):
+            patch_content = patch_content[1:]
+            self.logger.debug("  Stripped BOM prefix from patch file")
+        patch_content = patch_content.replace("\r\n", "\n").replace("\r", "\n")
+
         # -- Parse and apply patch ------------------------------------------
         hunks = self._parse_patch(patch_content)
         if not hunks:
@@ -360,11 +372,23 @@ class CodebasePatchAgent:
         patched_file.write_text(patched_content, encoding="utf-8")
 
         # -- Compute focus ranges for each version ----------------------------
-        # Original file: use orig_start / orig_count (pre-patch line numbers)
-        # Patched file:  use new_start / new_count  (post-patch line numbers)
-        # Add generous padding (±20 lines) so the LLM gets function-level
-        # context around each hunk, but doesn't scan the whole file.
+        # *Exact* hunk ranges (no padding) — used in the prompt to tell the
+        # LLM which lines are actually changed by the patch.
+        # *Padded* ranges (±20 lines) — used to extract the code sent to the
+        # LLM so it has surrounding function-level context.
         _PAD = 20
+
+        # Exact ranges (what the patch actually changes)
+        orig_exact = [
+            (h.orig_start, h.orig_start + max(h.orig_count - 1, 0))
+            for h in hunks
+        ]
+        patched_exact = [
+            (h.new_start, h.new_start + max(h.new_count - 1, 0))
+            for h in hunks
+        ]
+
+        # Padded ranges (code extraction window)
         orig_focus = [
             (max(1, h.orig_start - _PAD), h.orig_start + h.orig_count + _PAD)
             for h in hunks
@@ -383,6 +407,7 @@ class CodebasePatchAgent:
             original_issues = self._run_patch_llm_analysis(
                 original_content, self.filename, "original",
                 focus_line_ranges=orig_focus,
+                exact_hunk_ranges=orig_exact,
             )
             self.logger.info(f"  Original: {len(original_issues)} issue(s) found")
 
@@ -390,6 +415,7 @@ class CodebasePatchAgent:
             patched_issues = self._run_patch_llm_analysis(
                 patched_content, self.filename, "patched",
                 focus_line_ranges=patched_focus,
+                exact_hunk_ranges=patched_exact,
             )
             self.logger.info(f"  Patched: {len(patched_issues)} issue(s) found")
         else:
@@ -400,12 +426,14 @@ class CodebasePatchAgent:
                 reason.append("PATCH_REVIEW_PROMPT not found")
             self.logger.warning(f"  Skipping LLM analysis — {', '.join(reason)}")
 
-        # -- Run static adapters on patched file (optional) -----------------
+        # -- Run static adapters on patched file (optional — user must enable) --
         static_issues: List[Dict] = []
+        adapter_raw_results: Dict[str, List[Dict]] = {}
         if self.enable_adapters and ADAPTERS_AVAILABLE:
             self.logger.info("  Running static adapters on patched file...")
-            static_issues = self._run_static_analysis(
-                str(patched_dir), self.filename, focus_line_ranges=patched_focus,
+            static_issues, adapter_raw_results = self._run_static_analysis(
+                str(patched_dir), self.filename,
+                focus_line_ranges=patched_exact,  # use EXACT hunk ranges
             )
             self.logger.info(f"  Static analysis: {len(static_issues)} issue(s) found")
 
@@ -418,7 +446,7 @@ class CodebasePatchAgent:
 
         # -- Write to Excel -------------------------------------------------
         final_excel = excel_path or str(self.output_dir / "detailed_code_review.xlsx")
-        self._update_excel(final_excel, new_findings)
+        self._update_excel(final_excel, new_findings, adapter_raw_results)
 
         return {
             "status": "success",
@@ -433,25 +461,82 @@ class CodebasePatchAgent:
         }
 
     # ------------------------------------------------------------------
-    # Patch parsing
+    # Patch parsing — supports unified, context, normal, and combined
     # ------------------------------------------------------------------
 
-    _HUNK_RE = re.compile(
+    # Unified diff:   @@ -start,count +start,count @@
+    _UNIFIED_HUNK_RE = re.compile(
         r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@(.*)$"
     )
+    # Combined diff:  @@@ -start,count -start,count +start,count @@@
+    _COMBINED_HUNK_RE = re.compile(
+        r"^@@@\s+.*?\+(\d+)(?:,(\d+))?\s+@@@(.*)$"
+    )
+    # Context diff section separator
+    _CTX_SEP_RE = re.compile(r"^\*{15,}")
+    # Context diff original range: *** start,end ****
+    _CTX_ORIG_RE = re.compile(r"^\*\*\*\s+(\d+)(?:,(\d+))?\s+\*{4}")
+    # Context diff new range:      --- start,end ----
+    _CTX_NEW_RE = re.compile(r"^---\s+(\d+)(?:,(\d+))?\s+-{4}")
+    # Normal diff commands: NUMaNUM, NUMcNUM, NUMdNUM (with optional ranges)
+    _NORMAL_CMD_RE = re.compile(
+        r"^(\d+)(?:,(\d+))?([acd])(\d+)(?:,(\d+))?$"
+    )
+
+    def _detect_diff_format(self, patch_text: str) -> str:
+        """Auto-detect the diff format from the patch text.
+
+        Returns one of: ``"unified"``, ``"context"``, ``"normal"``,
+        ``"combined"``, or ``"unknown"``.
+        """
+        for line in patch_text.splitlines()[:100]:
+            if self._COMBINED_HUNK_RE.match(line):
+                return "combined"
+            if self._UNIFIED_HUNK_RE.match(line):
+                return "unified"
+            if self._CTX_SEP_RE.match(line):
+                return "context"
+            if self._NORMAL_CMD_RE.match(line):
+                return "normal"
+        return "unknown"
 
     def _parse_patch(self, patch_text: str) -> List[PatchHunk]:
-        """Parse a unified diff into a list of :class:`PatchHunk` objects."""
+        """Auto-detect format and parse into :class:`PatchHunk` objects.
+
+        Supported formats:
+          - **Unified diff**  (``diff -u``, ``git diff``) — ``@@`` markers
+          - **Context diff**  (``diff -c``) — ``***`` / ``---`` markers
+          - **Normal diff**   (``diff``) — ``NUMaNUM`` / ``NUMcNUM`` / ``NUMdNUM``
+          - **Combined diff** (``git diff`` merge conflicts) — ``@@@`` markers
+        """
+        fmt = self._detect_diff_format(patch_text)
+        self.logger.info(f"  Detected diff format: {fmt}")
+
+        if fmt == "unified":
+            return self._parse_unified(patch_text)
+        if fmt == "context":
+            return self._parse_context(patch_text)
+        if fmt == "normal":
+            return self._parse_normal(patch_text)
+        if fmt == "combined":
+            return self._parse_combined(patch_text)
+
+        # Fallback: try unified anyway (most common)
+        self.logger.warning("  Unknown diff format — falling back to unified parser")
+        return self._parse_unified(patch_text)
+
+    # ── Unified diff parser ──────────────────────────────────────────
+
+    def _parse_unified(self, patch_text: str) -> List[PatchHunk]:
+        """Parse a unified diff (``diff -u`` / ``git diff``)."""
         hunks: List[PatchHunk] = []
         current_hunk: Optional[PatchHunk] = None
 
         for line in patch_text.splitlines():
-            m = self._HUNK_RE.match(line)
+            m = self._UNIFIED_HUNK_RE.match(line)
             if m:
-                # Save the previous hunk
                 if current_hunk is not None:
                     hunks.append(current_hunk)
-
                 current_hunk = PatchHunk(
                     orig_start=int(m.group(1)),
                     orig_count=int(m.group(2) or 1),
@@ -462,22 +547,315 @@ class CodebasePatchAgent:
                 continue
 
             if current_hunk is None:
-                # Header lines (---, +++, diff --git, etc.) — skip
                 continue
 
             current_hunk.raw_lines.append(line)
-
             if line.startswith("-"):
                 current_hunk.removed_lines.append(line[1:])
             elif line.startswith("+"):
                 current_hunk.added_lines.append(line[1:])
             elif line.startswith(" ") or line == "":
-                current_hunk.context_lines.append(line[1:] if line.startswith(" ") else line)
+                current_hunk.context_lines.append(
+                    line[1:] if line.startswith(" ") else line
+                )
 
-        # Don't forget the last hunk
         if current_hunk is not None:
             hunks.append(current_hunk)
+        return hunks
 
+    # ── Context diff parser ──────────────────────────────────────────
+
+    def _parse_context(self, patch_text: str) -> List[PatchHunk]:
+        """Parse a context diff (``diff -c``).
+
+        Context diff structure::
+
+            *** file1.c  timestamp
+            --- file2.c  timestamp
+            ***************
+            *** 10,15 ****
+              context line
+            ! changed line (original)
+            - removed line
+              context line
+            --- 10,16 ----
+              context line
+            ! changed line (new)
+            + added line
+              context line
+        """
+        hunks: List[PatchHunk] = []
+        lines = patch_text.splitlines()
+        i = 0
+        n = len(lines)
+
+        while i < n:
+            # Look for *************** separator
+            if not self._CTX_SEP_RE.match(lines[i]):
+                i += 1
+                continue
+
+            i += 1
+            if i >= n:
+                break
+
+            # --- Parse original section: *** start,end ****
+            m_orig = self._CTX_ORIG_RE.match(lines[i])
+            if not m_orig:
+                continue
+            orig_start = int(m_orig.group(1))
+            orig_end = int(m_orig.group(2) or orig_start)
+            orig_count = orig_end - orig_start + 1
+            i += 1
+
+            # Collect original section lines
+            removed: List[str] = []
+            orig_context: List[str] = []
+            orig_raw: List[str] = []
+            while i < n:
+                ln = lines[i]
+                if self._CTX_NEW_RE.match(ln):
+                    break
+                if self._CTX_SEP_RE.match(ln):
+                    break
+                orig_raw.append(ln)
+                if ln.startswith("- ") or ln.startswith("-\t"):
+                    removed.append(ln[2:])
+                elif ln.startswith("! "):
+                    removed.append(ln[2:])
+                elif ln.startswith("  ") or ln.startswith("\t"):
+                    orig_context.append(ln[2:] if ln.startswith("  ") else ln[1:])
+                i += 1
+
+            # --- Parse new section: --- start,end ----
+            if i >= n:
+                break
+            m_new = self._CTX_NEW_RE.match(lines[i])
+            if not m_new:
+                # No new section — treat as pure deletion
+                hunks.append(PatchHunk(
+                    orig_start=orig_start,
+                    orig_count=orig_count,
+                    new_start=orig_start,
+                    new_count=0,
+                    header="",
+                    removed_lines=removed,
+                    added_lines=[],
+                    context_lines=orig_context,
+                    raw_lines=orig_raw,
+                ))
+                continue
+
+            new_start = int(m_new.group(1))
+            new_end = int(m_new.group(2) or new_start)
+            new_count = new_end - new_start + 1
+            i += 1
+
+            # Collect new section lines
+            added: List[str] = []
+            new_context: List[str] = []
+            raw_lines: List[str] = list(orig_raw)
+            while i < n:
+                ln = lines[i]
+                if self._CTX_SEP_RE.match(ln):
+                    break
+                if self._CTX_ORIG_RE.match(ln):
+                    break
+                raw_lines.append(ln)
+                if ln.startswith("+ ") or ln.startswith("+\t"):
+                    added.append(ln[2:])
+                elif ln.startswith("! "):
+                    added.append(ln[2:])
+                elif ln.startswith("  ") or ln.startswith("\t"):
+                    new_context.append(ln[2:] if ln.startswith("  ") else ln[1:])
+                i += 1
+
+            # Build unified-style raw_lines for _apply_patch compatibility
+            unified_raw: List[str] = []
+            for r in removed:
+                unified_raw.append(f"-{r}")
+            for c in orig_context:
+                unified_raw.append(f" {c}")
+            for a in added:
+                unified_raw.append(f"+{a}")
+
+            hunks.append(PatchHunk(
+                orig_start=orig_start,
+                orig_count=orig_count,
+                new_start=new_start,
+                new_count=new_count,
+                header="",
+                removed_lines=removed,
+                added_lines=added,
+                context_lines=list(set(orig_context + new_context)),
+                raw_lines=unified_raw,
+            ))
+
+        return hunks
+
+    # ── Normal diff parser ───────────────────────────────────────────
+
+    def _parse_normal(self, patch_text: str) -> List[PatchHunk]:
+        """Parse a normal diff (plain ``diff`` output).
+
+        Normal diff format::
+
+            5a6,7        ← add after line 5: lines 6-7 in new file
+            > added line1
+            > added line2
+            10,12c10,11  ← change lines 10-12 to lines 10-11
+            < old line1
+            < old line2
+            < old line3
+            ---
+            > new line1
+            > new line2
+            15d14        ← delete line 15 (was before line 14 in new)
+            < deleted line
+        """
+        hunks: List[PatchHunk] = []
+        lines = patch_text.splitlines()
+        i = 0
+        n = len(lines)
+
+        while i < n:
+            m = self._NORMAL_CMD_RE.match(lines[i])
+            if not m:
+                i += 1
+                continue
+
+            orig_s = int(m.group(1))
+            orig_e = int(m.group(2) or orig_s)
+            cmd = m.group(3)          # 'a', 'c', or 'd'
+            new_s = int(m.group(4))
+            new_e = int(m.group(5) or new_s)
+            i += 1
+
+            removed: List[str] = []
+            added: List[str] = []
+            raw_lines: List[str] = []
+
+            # For 'a' (add): orig side has 0 lines removed
+            # For 'd' (delete): new side has 0 lines added
+            # For 'c' (change): both sides present, separated by '---'
+
+            if cmd == "a":
+                # Collect '>' lines (additions)
+                while i < n and lines[i].startswith("> "):
+                    content = lines[i][2:]
+                    added.append(content)
+                    raw_lines.append(f"+{content}")
+                    i += 1
+                hunks.append(PatchHunk(
+                    orig_start=orig_s + 1,  # 'a' means "after orig_s"
+                    orig_count=0,
+                    new_start=new_s,
+                    new_count=new_e - new_s + 1,
+                    header="",
+                    removed_lines=[],
+                    added_lines=added,
+                    context_lines=[],
+                    raw_lines=raw_lines,
+                ))
+
+            elif cmd == "d":
+                # Collect '<' lines (deletions)
+                while i < n and lines[i].startswith("< "):
+                    content = lines[i][2:]
+                    removed.append(content)
+                    raw_lines.append(f"-{content}")
+                    i += 1
+                hunks.append(PatchHunk(
+                    orig_start=orig_s,
+                    orig_count=orig_e - orig_s + 1,
+                    new_start=new_s,
+                    new_count=0,
+                    header="",
+                    removed_lines=removed,
+                    added_lines=[],
+                    context_lines=[],
+                    raw_lines=raw_lines,
+                ))
+
+            elif cmd == "c":
+                # Collect '<' lines (original / removed)
+                while i < n and lines[i].startswith("< "):
+                    content = lines[i][2:]
+                    removed.append(content)
+                    raw_lines.append(f"-{content}")
+                    i += 1
+
+                # Skip '---' separator
+                if i < n and lines[i] == "---":
+                    i += 1
+
+                # Collect '>' lines (new / added)
+                while i < n and lines[i].startswith("> "):
+                    content = lines[i][2:]
+                    added.append(content)
+                    raw_lines.append(f"+{content}")
+                    i += 1
+
+                hunks.append(PatchHunk(
+                    orig_start=orig_s,
+                    orig_count=orig_e - orig_s + 1,
+                    new_start=new_s,
+                    new_count=new_e - new_s + 1,
+                    header="",
+                    removed_lines=removed,
+                    added_lines=added,
+                    context_lines=[],
+                    raw_lines=raw_lines,
+                ))
+
+        return hunks
+
+    # ── Combined diff parser ─────────────────────────────────────────
+
+    def _parse_combined(self, patch_text: str) -> List[PatchHunk]:
+        """Parse a combined diff (``git diff`` on merge conflicts).
+
+        Combined diffs use ``@@@`` markers and have two original columns.
+        We treat them as a single unified diff using only the final
+        (merged) column.
+        """
+        hunks: List[PatchHunk] = []
+        current_hunk: Optional[PatchHunk] = None
+
+        for line in patch_text.splitlines():
+            m = self._COMBINED_HUNK_RE.match(line)
+            if m:
+                if current_hunk is not None:
+                    hunks.append(current_hunk)
+                new_start = int(m.group(1))
+                new_count = int(m.group(2) or 1)
+                current_hunk = PatchHunk(
+                    orig_start=new_start,
+                    orig_count=new_count,
+                    new_start=new_start,
+                    new_count=new_count,
+                    header=m.group(3).strip(),
+                )
+                continue
+
+            if current_hunk is None:
+                continue
+
+            current_hunk.raw_lines.append(line)
+
+            # Combined diffs prefix lines with two columns (e.g., '+ ', ' +', '++', '  ')
+            # We simplify: lines starting with '++' or '+ ' are additions,
+            # lines starting with '--' are removals, everything else is context.
+            if line.startswith("++") or line.startswith("+ "):
+                current_hunk.added_lines.append(line[2:] if len(line) > 2 else "")
+            elif line.startswith("--"):
+                current_hunk.removed_lines.append(line[2:] if len(line) > 2 else "")
+            else:
+                ctx = line[2:] if len(line) > 2 else (line[1:] if len(line) > 1 else "")
+                current_hunk.context_lines.append(ctx)
+
+        if current_hunk is not None:
+            hunks.append(current_hunk)
         return hunks
 
     # ------------------------------------------------------------------
@@ -534,6 +912,7 @@ class CodebasePatchAgent:
         filename: str,
         label: str,
         focus_line_ranges: Optional[List[tuple]] = None,
+        exact_hunk_ranges: Optional[List[tuple]] = None,
     ) -> List[Dict]:
         """Self-contained LLM analysis scoped to patch hunk regions.
 
@@ -546,6 +925,12 @@ class CodebasePatchAgent:
         3. Builds a prompt using ``PATCH_REVIEW_PROMPT``.
         4. Calls ``self.llm_tools.llm_call()`` directly.
         5. Parses the ``---ISSUE---`` response blocks.
+
+        Args:
+            focus_line_ranges: Padded ranges (±20 lines) used for code extraction.
+            exact_hunk_ranges: Exact hunk line ranges (no padding) — the lines
+                actually changed by the patch. Used in the prompt to tell the
+                LLM precisely which lines to review.
 
         Returns a list of issue dicts.
         """
@@ -584,10 +969,23 @@ class CodebasePatchAgent:
             chunk_text = "\n".join(chunk_lines)
             chunk_line_count = len(chunk_lines)
 
-            # Numbered code block
+            # Numbered code block with visual markers for changed vs context lines.
+            # Lines within exact hunk ranges get a '>>>' prefix so the LLM
+            # can clearly distinguish changed lines from surrounding context.
+            def _in_exact_range(line_num: int) -> bool:
+                """Check if line_num falls within any exact hunk range."""
+                if not exact_hunk_ranges:
+                    return True  # no exact ranges = treat all as changed
+                for ex_start, ex_end in exact_hunk_ranges:
+                    if ex_start <= line_num <= ex_end:
+                        return True
+                return False
+
             numbered = []
             for idx, line in enumerate(chunk_lines):
-                numbered.append(f"{chunk_start + idx:5d} | {line}")
+                abs_line = chunk_start + idx
+                marker = ">>>" if _in_exact_range(abs_line) else "   "
+                numbered.append(f"{marker} {abs_line:5d} | {line}")
             numbered_code_block = "\n".join(numbered)
 
             # --- Per-chunk context layers ---
@@ -631,13 +1029,20 @@ class CodebasePatchAgent:
                 """
 
             # --- Patch line ranges block ---
+            # Use EXACT hunk ranges (no padding) so the LLM knows precisely
+            # which lines were changed.  The padded focus_line_ranges are only
+            # used for code extraction — the LLM should NOT flag issues on
+            # the buffer/context lines.
+            exact_ranges_for_prompt = exact_hunk_ranges or focus_line_ranges or ranges
             range_strs = ", ".join(
-                f"{s}-{e}" for s, e in (focus_line_ranges or ranges)
+                f"{s}-{e}" for s, e in exact_ranges_for_prompt
             )
             patch_scope_block = f"""
             ========================================
-            PATCH LINE RANGES (only flag issues on these lines):
+            PATCH LINE RANGES (ONLY flag issues on these exact lines):
               [{range_strs}]
+            Lines marked with '>>>' in the code below are CHANGED lines.
+            Lines marked with '   ' are CONTEXT ONLY — do NOT flag issues on them.
             ========================================
             """
 
@@ -661,6 +1066,22 @@ class CodebasePatchAgent:
             {final_chunk_text}
             ```
             """
+
+            # --- Debug: dump prompt to {output_dir}/prompt_dumps/ ---
+            if self.logger.isEnabledFor(logging.DEBUG):
+                try:
+                    dump_dir = os.path.join(str(self.output_dir), "prompt_dumps")
+                    os.makedirs(dump_dir, exist_ok=True)
+                    safe_name = filename.replace("/", "__").replace("\\", "__")
+                    dump_path = os.path.join(
+                        dump_dir,
+                        f"patch_{safe_name}_{label}_chunk{rng_idx + 1}.txt",
+                    )
+                    with open(dump_path, "w", encoding="utf-8") as df:
+                        df.write(final_prompt)
+                    self.logger.debug(f"    Prompt dump: {dump_path}")
+                except Exception:
+                    pass  # never fail on debug dump
 
             # --- LLM call ---
             try:
@@ -843,9 +1264,12 @@ class CodebasePatchAgent:
             issues.append({
                 "file_path": file_path,
                 "line_number": calculated_line,
+                "title": data.get("Title", ""),
                 "severity": data.get("Severity", "medium").lower(),
+                "confidence": data.get("Confidence", ""),
                 "category": data.get("Category", ""),
                 "description": data.get("Description", ""),
+                "suggestion": data.get("Suggestion", ""),
                 "code": raw_code,
                 "fixed_code": fixed_code,
                 "source": f"patch_llm",
@@ -860,19 +1284,24 @@ class CodebasePatchAgent:
     def _run_static_analysis(
         self, temp_dir: str, filename: str,
         focus_line_ranges: Optional[List[tuple]] = None,
-    ) -> List[Dict]:
+    ) -> Tuple[List[Dict], Dict[str, List[Dict]]]:
         """Run static analysis adapters on the patched file.
 
         When ``focus_line_ranges`` is provided, only findings whose line
         number falls within one of the (start, end) ranges are kept.
         This prevents the adapters (which always scan the whole file)
         from flooding the output with pre-existing issues.
+
+        Returns:
+            Tuple of (merged_issues, per_adapter_results) where
+            per_adapter_results maps adapter name → list of raw detail dicts
+            for separate Excel tabs.
         """
         if not ADAPTERS_AVAILABLE:
-            return []
+            return [], {}
 
         def _in_focus(line: int) -> bool:
-            """Return True if *line* falls within any focus range."""
+            """Return True if *line* falls within any exact hunk range."""
             if not focus_line_ranges:
                 return True  # no filter → keep everything
             for fstart, fend in focus_line_ranges:
@@ -881,6 +1310,7 @@ class CodebasePatchAgent:
             return False
 
         issues: List[Dict] = []
+        adapter_raw: Dict[str, List[Dict]] = {}
         try:
             # Build a minimal file cache for adapters
             from agents.core.file_processor import FileProcessor
@@ -910,22 +1340,30 @@ class CodebasePatchAgent:
                             or result.get("findings")
                             or result.get("issues", [])
                         )
+                        filtered_details: List[Dict] = []
                         for finding in raw_findings:
                             if not isinstance(finding, dict):
                                 continue
                             line_num = finding.get("line", 0)
-                            # --- Patch scope filter ---
+                            # --- Patch scope filter (exact hunk ranges) ---
                             if not _in_focus(line_num):
                                 continue
+                            filtered_details.append(finding)
                             issues.append({
                                 "file_path": finding.get("file", filename),
                                 "line_number": line_num,
+                                "title": finding.get("description", finding.get("message", ""))[:80],
                                 "severity": finding.get("severity", "medium"),
+                                "confidence": "CERTAIN",
                                 "category": f"static_{name}",
                                 "description": finding.get("description", finding.get("message", "")),
+                                "suggestion": "",
                                 "code": finding.get("code", ""),
+                                "fixed_code": "",
                                 "source": f"static_{name}",
                             })
+                        if filtered_details:
+                            adapter_raw[name] = filtered_details
                 except Exception as exc:
                     self.logger.warning(f"Adapter {name} failed: {exc}")
 
@@ -937,7 +1375,7 @@ class CodebasePatchAgent:
         self.logger.info(
             f"  Static adapters: {len(issues)} issue(s) after patch-scope filtering"
         )
-        return issues
+        return issues, adapter_raw
 
     # ------------------------------------------------------------------
     # Findings diff
@@ -1010,9 +1448,12 @@ class CodebasePatchAgent:
             finding = PatchFinding(
                 file_path=issue.get("file_path", self.filename),
                 line_number=line_num,
+                title=issue.get("title", ""),
                 severity=issue.get("severity", "medium"),
+                confidence=issue.get("confidence", ""),
                 category=issue.get("category", ""),
                 description=issue.get("description", ""),
+                suggestion=issue.get("suggestion", ""),
                 code_before=issue.get("code", ""),
                 code_after=issue.get("fixed_code", ""),
                 introduced_by_patch=True,
@@ -1027,9 +1468,17 @@ class CodebasePatchAgent:
     # ------------------------------------------------------------------
 
     def _update_excel(
-        self, excel_path: str, findings: List[PatchFinding]
+        self, excel_path: str, findings: List[PatchFinding],
+        adapter_results: Optional[Dict[str, List[Dict]]] = None,
     ) -> None:
-        """Write patch findings to a ``patch_<filename>`` tab in the Excel file."""
+        """Write patch findings to a ``patch_<filename>`` tab in the Excel file.
+
+        The column layout matches the main ``Analysis`` sheet produced by
+        :class:`CodebaseLLMAgent` so the fixer agent can consume it:
+
+            S.No | Title | Severity | Confidence | Category | File | Line |
+            Description | Suggestion | Code | Fixed_Code | Feedback | Constraints
+        """
         if not EXCEL_WRITER_AVAILABLE:
             self.logger.warning("ExcelWriter not available — writing findings as JSON instead")
             self._write_findings_json(findings)
@@ -1040,39 +1489,38 @@ class CodebasePatchAgent:
         if len(sheet_name) > 31:
             sheet_name = sheet_name[:31]
 
+        # Column layout matching CodebaseLLMAgent's Analysis sheet
         headers = [
-            "File",
-            "Line",
-            "Severity",
-            "Category",
-            "Description",
-            "Code_Before",
-            "Code_After",
-            "Introduced_By_Patch",
-            "Issue_Source",
+            "S.No", "Title", "Severity", "Confidence", "Category",
+            "File", "Line", "Description", "Suggestion",
+            "Code", "Fixed_Code", "Feedback", "Constraints",
         ]
 
         data_rows: List[List[Any]] = []
-        for f in findings:
+        for idx, f in enumerate(findings, start=1):
             data_rows.append([
+                idx,
+                f.title or f.description[:80] if f.description else "",
+                f.severity,
+                f.confidence,
+                f.category,
                 f.file_path,
                 f.line_number,
-                f.severity,
-                f.category,
                 f.description,
+                f.suggestion,
                 f.code_before,
                 f.code_after,
-                "YES" if f.introduced_by_patch else "NO",
-                f.issue_source,
+                f.feedback,
+                f.constraints,
             ])
 
         try:
-            # Try to open existing workbook and add a new sheet
             excel_file = Path(excel_path)
 
             if excel_file.exists():
                 try:
                     import openpyxl
+                    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
                     wb = openpyxl.load_workbook(str(excel_file))
 
                     # Remove existing sheet with the same name if present
@@ -1081,26 +1529,68 @@ class CodebasePatchAgent:
 
                     ws = wb.create_sheet(title=sheet_name)
 
-                    # Write header row
-                    for col_idx, header in enumerate(headers, 1):
-                        ws.cell(row=1, column=col_idx, value=header)
+                    # ── Style definitions (matching ExcelWriter defaults) ──
+                    header_font = Font(bold=True, color="FFFFFF")
+                    header_fill = PatternFill("solid", fgColor="4F81BD")
+                    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                    thin = Side(border_style="thin", color="D0D0D0")
+                    cell_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                    alt_fill = PatternFill("solid", fgColor="F3F3F3")
 
-                    # Write data rows
+                    # Severity colour fills
+                    sev_fills = {
+                        "CRITICAL": PatternFill("solid", fgColor="FFC7CE"),
+                        "MEDIUM":   PatternFill("solid", fgColor="FFEB9C"),
+                        "LOW":      PatternFill("solid", fgColor="C6EFCE"),
+                    }
+                    sev_fonts = {
+                        "CRITICAL": Font(bold=True, color="9C0006"),
+                        "MEDIUM":   Font(bold=True, color="9C6500"),
+                        "LOW":      Font(bold=True, color="006100"),
+                    }
+
+                    # Write styled header row
+                    for col_idx, header in enumerate(headers, 1):
+                        cell = ws.cell(row=1, column=col_idx, value=header)
+                        cell.font = header_font
+                        cell.fill = header_fill
+                        cell.alignment = header_align
+
+                    # Write data rows with formatting
+                    sev_col_idx = headers.index("Severity")  # 0-based
                     for row_idx, row_data in enumerate(data_rows, 2):
                         for col_idx, value in enumerate(row_data, 1):
-                            ws.cell(row=row_idx, column=col_idx, value=value)
+                            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                            cell.border = cell_border
+                            cell.alignment = Alignment(vertical="top", wrap_text=True)
 
-                    # [FIX] Safer column width adjustment
+                            # Severity column colouring
+                            if (col_idx - 1) == sev_col_idx:
+                                upper_val = str(value).strip().upper()
+                                if upper_val in sev_fills:
+                                    cell.fill = sev_fills[upper_val]
+                                    cell.font = sev_fonts[upper_val]
+                            elif row_idx % 2 == 0:
+                                cell.fill = alt_fill
+
+                    # Auto-fit column widths
                     for col_idx, header in enumerate(headers, 1):
                         max_len = len(header)
                         for row_data in data_rows:
-                            # Ensure we don't index out of bounds if row_data is short
                             if (col_idx - 1) < len(row_data):
                                 val_len = len(str(row_data[col_idx - 1]))
                                 max_len = max(max_len, min(val_len, 60))
                         ws.column_dimensions[
                             openpyxl.utils.get_column_letter(col_idx)
                         ].width = max_len + 4
+
+                    # Freeze header row and add auto-filter
+                    ws.freeze_panes = "A2"
+                    last_col = openpyxl.utils.get_column_letter(len(headers))
+                    ws.auto_filter.ref = f"A1:{last_col}{len(data_rows) + 1}"
+
+                    # Write separate static adapter tabs if adapters were run
+                    self._write_adapter_tabs_openpyxl(wb, adapter_results)
 
                     wb.save(str(excel_file))
                     self.logger.info(
@@ -1110,13 +1600,12 @@ class CodebasePatchAgent:
 
                 except PermissionError:
                     self.logger.error(f"Permission denied writing to {excel_path}. File may be open.")
-                    # Fallback to JSON if file is locked
                     self._write_findings_json(findings)
                     return
                 except Exception as exc:
                     self.logger.warning(f"Failed to update existing Excel: {exc} — attempting create new")
 
-            # Create new workbook with ExcelWriter
+            # Create new workbook with ExcelWriter (matches other sheets' styling)
             writer = ExcelWriter(str(excel_path))
             writer.add_table_sheet(
                 headers=headers,
@@ -1124,6 +1613,35 @@ class CodebasePatchAgent:
                 sheet_name=sheet_name,
                 status_column="Severity",
             )
+
+            # Append separate static adapter tabs
+            if adapter_results:
+                adapter_headers = [
+                    "File", "Function", "Line", "Description",
+                    "Severity", "Category", "CWE",
+                ]
+                for adapter_name, details in adapter_results.items():
+                    if not details:
+                        continue
+                    tab_name = f"patch_static_{adapter_name}"[:31]
+                    rows = [
+                        [
+                            d.get("file", ""),
+                            d.get("function", ""),
+                            d.get("line", ""),
+                            d.get("description", ""),
+                            d.get("severity", ""),
+                            d.get("category", ""),
+                            d.get("cwe", ""),
+                        ]
+                        for d in details
+                    ]
+                    writer.add_table_sheet(
+                        adapter_headers, rows,
+                        tab_name,
+                        status_column="Severity",
+                    )
+
             writer.save()
             self.logger.info(
                 f"Created {excel_path} with '{sheet_name}' tab ({len(findings)} findings)"
@@ -1132,6 +1650,87 @@ class CodebasePatchAgent:
         except Exception as exc:
             self.logger.error(f"Failed to write Excel: {exc}")
             self._write_findings_json(findings)
+
+    def _write_adapter_tabs_openpyxl(
+        self, wb: Any, adapter_results: Optional[Dict[str, List[Dict]]]
+    ) -> None:
+        """Write per-adapter static analysis tabs to an existing openpyxl workbook.
+
+        Matches the ``static_<adapter>`` tab format from :class:`CodebaseLLMAgent`.
+        """
+        if not adapter_results:
+            return
+
+        try:
+            import openpyxl
+            from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
+            adapter_headers = [
+                "File", "Function", "Line", "Description",
+                "Severity", "Category", "CWE",
+            ]
+
+            header_font = Font(bold=True, color="FFFFFF")
+            header_fill = PatternFill("solid", fgColor="4F81BD")
+            header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            thin = Side(border_style="thin", color="D0D0D0")
+            cell_border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            alt_fill = PatternFill("solid", fgColor="F3F3F3")
+
+            for adapter_name, details in adapter_results.items():
+                if not details:
+                    continue
+                tab_name = f"patch_static_{adapter_name}"[:31]
+
+                # Remove existing tab
+                if tab_name in wb.sheetnames:
+                    del wb[tab_name]
+
+                ws = wb.create_sheet(title=tab_name)
+
+                # Header row
+                for col_idx, hdr in enumerate(adapter_headers, 1):
+                    cell = ws.cell(row=1, column=col_idx, value=hdr)
+                    cell.font = header_font
+                    cell.fill = header_fill
+                    cell.alignment = header_align
+
+                # Data rows
+                for row_idx, d in enumerate(details, 2):
+                    row_data = [
+                        d.get("file", ""),
+                        d.get("function", ""),
+                        d.get("line", ""),
+                        d.get("description", ""),
+                        d.get("severity", ""),
+                        d.get("category", ""),
+                        d.get("cwe", ""),
+                    ]
+                    for col_idx, value in enumerate(row_data, 1):
+                        cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                        cell.border = cell_border
+                        cell.alignment = Alignment(vertical="top", wrap_text=True)
+                        if row_idx % 2 == 0:
+                            cell.fill = alt_fill
+
+                # Auto-fit + freeze
+                for col_idx, hdr in enumerate(adapter_headers, 1):
+                    max_len = len(hdr)
+                    for d in details:
+                        keys = ["file", "function", "line", "description", "severity", "category", "cwe"]
+                        if (col_idx - 1) < len(keys):
+                            val_len = len(str(d.get(keys[col_idx - 1], "")))
+                            max_len = max(max_len, min(val_len, 60))
+                    ws.column_dimensions[
+                        openpyxl.utils.get_column_letter(col_idx)
+                    ].width = max_len + 4
+                ws.freeze_panes = "A2"
+
+                self.logger.info(
+                    f"  Added '{tab_name}' tab ({len(details)} findings)"
+                )
+        except Exception as exc:
+            self.logger.warning(f"Failed to write adapter tabs: {exc}")
 
     def _write_findings_json(self, findings: List[PatchFinding]) -> None:
         """Fallback: write findings as JSON."""
@@ -1152,11 +1751,16 @@ class CodebasePatchAgent:
         return {
             "file_path": finding.file_path,
             "line_number": finding.line_number,
+            "title": finding.title,
             "severity": finding.severity,
+            "confidence": finding.confidence,
             "category": finding.category,
             "description": finding.description,
-            "code_before": finding.code_before,
-            "code_after": finding.code_after,
+            "suggestion": finding.suggestion,
+            "code": finding.code_before,
+            "fixed_code": finding.code_after,
+            "feedback": finding.feedback,
+            "constraints": finding.constraints,
             "introduced_by_patch": finding.introduced_by_patch,
             "issue_source": finding.issue_source,
         }

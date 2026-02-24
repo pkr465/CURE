@@ -2,11 +2,18 @@
 CURE — Codebase Update & Refactor Engine
 Codebase Patch Agent
 
-Analyses patches (unified diffs) against source files to identify issues
-introduced by the patch. Uses :class:`CodebaseLLMAgent` and optionally
-:class:`StaticAnalyzerAgent` to compare original vs. patched code, then
-writes findings to a ``patch_<filename>`` tab in
-``detailed_code_review.xlsx``.
+Self-contained patch analysis agent.  Analyses patches (unified diffs)
+against source files to identify issues **introduced by the patch**.
+
+The agent is fully independent of :class:`CodebaseLLMAgent`.  It:
+  1. Parses the unified diff and applies hunks to reconstruct the patched file.
+  2. Extracts only the code regions around the hunks (not the whole file).
+  3. Gathers 4-layer context from the real codebase (header context,
+     context validation, call-stack analysis, constraints).
+  4. Sends the hunk-scoped code + context to the LLM using
+     ``PATCH_REVIEW_PROMPT`` and calls ``LLMTools.llm_call()`` directly.
+  5. Parses the LLM response, post-filters to hunk ranges, and writes
+     findings to a ``patch_<filename>`` tab in ``detailed_code_review.xlsx``.
 """
 
 import logging
@@ -24,6 +31,40 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 # Graceful imports
 # ---------------------------------------------------------------------------
 
+# Patch Review prompt (dedicated, NOT the general analysis prompt)
+try:
+    from prompts.patch_review_prompt import PATCH_REVIEW_PROMPT
+    PATCH_PROMPT_AVAILABLE = True
+except ImportError:
+    PATCH_REVIEW_PROMPT = None
+    PATCH_PROMPT_AVAILABLE = False
+
+# Context layer: header resolution
+try:
+    from agents.context.header_context_builder import HeaderContextBuilder
+    HEADER_CTX_AVAILABLE = True
+except ImportError:
+    HeaderContextBuilder = None
+    HEADER_CTX_AVAILABLE = False
+
+# Context layer: context validation (false-positive reduction)
+try:
+    from agents.context.context_validator import ContextValidator
+    CTX_VALIDATOR_AVAILABLE = True
+except ImportError:
+    ContextValidator = None
+    CTX_VALIDATOR_AVAILABLE = False
+
+# Context layer: static call-stack tracing
+try:
+    from agents.context.static_call_stack_analyzer import StaticCallStackAnalyzer
+    CALL_STACK_AVAILABLE = True
+except ImportError:
+    StaticCallStackAnalyzer = None
+    CALL_STACK_AVAILABLE = False
+
+# Constraint loader — reuse the one already on CodebaseLLMAgent if available,
+# otherwise we load constraints ourselves with a simple regex parser.
 try:
     from agents.codebase_llm_agent import CodebaseLLMAgent
     LLM_AGENT_AVAILABLE = True
@@ -203,6 +244,27 @@ class CodebasePatchAgent:
         # Temp directory for analysis artefacts
         self._temp_dir: Optional[Path] = None
 
+        # --- Context layers (initialised lazily or here) ---
+        # ContextValidator: per-chunk false-positive reduction
+        self.context_validator = None
+        if CTX_VALIDATOR_AVAILABLE:
+            try:
+                self.context_validator = ContextValidator()
+                self.logger.debug("  ContextValidator enabled for patch review")
+            except Exception as cv_err:
+                self.logger.debug(f"  ContextValidator init failed: {cv_err}")
+
+        # StaticCallStackAnalyzer: cross-function call-chain tracing
+        self.call_stack_analyzer = None
+        if CALL_STACK_AVAILABLE:
+            try:
+                self.call_stack_analyzer = StaticCallStackAnalyzer(
+                    codebase_root=str(self.codebase_path)
+                )
+                self.logger.debug("  StaticCallStackAnalyzer enabled for patch review")
+            except Exception as csa_err:
+                self.logger.debug(f"  StaticCallStackAnalyzer init failed: {csa_err}")
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -297,30 +359,54 @@ class CodebasePatchAgent:
         orig_file.write_text(original_content, encoding="utf-8")
         patched_file.write_text(patched_content, encoding="utf-8")
 
+        # -- Compute focus ranges for each version ----------------------------
+        # Original file: use orig_start / orig_count (pre-patch line numbers)
+        # Patched file:  use new_start / new_count  (post-patch line numbers)
+        # Add generous padding (±20 lines) so the LLM gets function-level
+        # context around each hunk, but doesn't scan the whole file.
+        _PAD = 20
+        orig_focus = [
+            (max(1, h.orig_start - _PAD), h.orig_start + h.orig_count + _PAD)
+            for h in hunks
+        ]
+        patched_focus = [
+            (max(1, h.new_start - _PAD), h.new_start + h.new_count + _PAD)
+            for h in hunks
+        ]
+
         # -- Run LLM analysis on both versions ------------------------------
         original_issues: List[Dict] = []
         patched_issues: List[Dict] = []
 
-        if LLM_AGENT_AVAILABLE:
-            self.logger.info("  Running LLM analysis on original file...")
-            original_issues = self._run_llm_analysis(
-                str(orig_dir), self.filename, "original"
+        if self.llm_tools and PATCH_PROMPT_AVAILABLE:
+            self.logger.info("  Running patch LLM analysis on original file...")
+            original_issues = self._run_patch_llm_analysis(
+                original_content, self.filename, "original",
+                focus_line_ranges=orig_focus,
             )
             self.logger.info(f"  Original: {len(original_issues)} issue(s) found")
 
-            self.logger.info("  Running LLM analysis on patched file...")
-            patched_issues = self._run_llm_analysis(
-                str(patched_dir), self.filename, "patched"
+            self.logger.info("  Running patch LLM analysis on patched file...")
+            patched_issues = self._run_patch_llm_analysis(
+                patched_content, self.filename, "patched",
+                focus_line_ranges=patched_focus,
             )
             self.logger.info(f"  Patched: {len(patched_issues)} issue(s) found")
         else:
-            self.logger.warning("  CodebaseLLMAgent not available — skipping LLM analysis")
+            reason = []
+            if not self.llm_tools:
+                reason.append("LLMTools not available")
+            if not PATCH_PROMPT_AVAILABLE:
+                reason.append("PATCH_REVIEW_PROMPT not found")
+            self.logger.warning(f"  Skipping LLM analysis — {', '.join(reason)}")
 
         # -- Run static adapters on patched file (optional) -----------------
         static_issues: List[Dict] = []
         if self.enable_adapters and ADAPTERS_AVAILABLE:
             self.logger.info("  Running static adapters on patched file...")
-            static_issues = self._run_static_analysis(str(patched_dir), self.filename)
+            static_issues = self._run_static_analysis(
+                str(patched_dir), self.filename, focus_line_ranges=patched_focus,
+            )
             self.logger.info(f"  Static analysis: {len(static_issues)} issue(s) found")
 
         # Merge patched_issues + static_issues
@@ -436,143 +522,334 @@ class CodebasePatchAgent:
         return "".join(lines)
 
     # ------------------------------------------------------------------
-    # LLM analysis
+    # LLM analysis (self-contained — no CodebaseLLMAgent dependency)
     # ------------------------------------------------------------------
 
-    def _run_llm_analysis(
-        self, temp_dir: str, filename: str, label: str
+    # Padding (lines) around each hunk for function-level context
+    _HUNK_PAD = 20
+
+    def _run_patch_llm_analysis(
+        self,
+        file_content: str,
+        filename: str,
+        label: str,
+        focus_line_ranges: Optional[List[tuple]] = None,
     ) -> List[Dict]:
-        """Run CodebaseLLMAgent on a single file in a temp directory.
+        """Self-contained LLM analysis scoped to patch hunk regions.
 
-        Uses the *real* codebase path (``self.codebase_path``) so that the
-        inner agent's 4-layer context pipeline (header context, context
-        validation, call-stack analysis, constraints) can see the full
-        codebase.  The temp file is passed via an absolute
-        ``file_to_fix`` so the agent analyses the correct version
-        (original or patched) while still resolving includes and call
-        graphs against the real codebase.
+        Instead of delegating to :class:`CodebaseLLMAgent` (which scans
+        the entire file), this method:
 
-        Returns a list of issue dicts extracted from the agent's results.
+        1. Extracts only the code surrounding each hunk from *file_content*.
+        2. Gathers 4-layer context from the **real codebase** (header
+           context, context validation, call-stack analysis, constraints).
+        3. Builds a prompt using ``PATCH_REVIEW_PROMPT``.
+        4. Calls ``self.llm_tools.llm_call()`` directly.
+        5. Parses the ``---ISSUE---`` response blocks.
+
+        Returns a list of issue dicts.
         """
-        if not LLM_AGENT_AVAILABLE:
+        if not self.llm_tools:
+            return []
+        if not PATCH_PROMPT_AVAILABLE:
+            self.logger.warning("PATCH_REVIEW_PROMPT not available — skipping")
             return []
 
-        try:
-            analysis_out = os.path.join(self._temp_dir, f"llm_{label}")
-            os.makedirs(analysis_out, exist_ok=True)
+        all_issues: List[Dict] = []
+        all_lines = file_content.splitlines()
+        total_lines = len(all_lines)
 
-            # Use the ABSOLUTE path to the temp file so CodebaseLLMAgent's
-            # _gather_files() picks it up directly (absolute paths bypass
-            # codebase_path resolution).  Meanwhile, codebase_path points
-            # at the real codebase so HeaderContextBuilder, ContextValidator,
-            # and StaticCallStackAnalyzer index the full project.
-            temp_file_abs = str(Path(temp_dir).resolve() / filename)
+        # --- Build context layers once (they apply to the whole file) ---
+        header_context = self._gather_header_context(filename, file_content)
+        constraints_context = self._load_constraints_for_file(filename)
+        call_stack_context = ""
+        if CALL_STACK_AVAILABLE and self.call_stack_analyzer:
+            try:
+                # Build full-file call stack index for the real codebase
+                call_stack_context = ""  # populated per-chunk below
+            except Exception:
+                pass
 
-            agent = CodebaseLLMAgent(
-                codebase_path=str(self.codebase_path),
-                output_dir=analysis_out,
-                config=self.config,
-                llm_tools=self.llm_tools,
-                exclude_dirs=self.exclude_dirs,
-                exclude_globs=self.exclude_globs,
-                max_files=1,
-                file_to_fix=temp_file_abs,
-                hitl_context=self.hitl_context,
-                constraints_dir=str(self.constraints_dir),
-                custom_constraints=self.custom_constraints,
+        # --- Iterate over focus ranges ---
+        ranges = focus_line_ranges or [(1, total_lines)]
+        for rng_idx, (rng_start, rng_end) in enumerate(ranges):
+            # Clamp to file bounds
+            chunk_start = max(1, rng_start)
+            chunk_end = min(total_lines, rng_end)
+            if chunk_start >= chunk_end:
+                continue
+
+            # Extract chunk (1-based inclusive)
+            chunk_lines = all_lines[chunk_start - 1 : chunk_end]
+            chunk_text = "\n".join(chunk_lines)
+            chunk_line_count = len(chunk_lines)
+
+            # Numbered code block
+            numbered = []
+            for idx, line in enumerate(chunk_lines):
+                numbered.append(f"{chunk_start + idx:5d} | {line}")
+            numbered_code_block = "\n".join(numbered)
+
+            # --- Per-chunk context layers ---
+            validation_context = ""
+            if CTX_VALIDATOR_AVAILABLE and self.context_validator:
+                try:
+                    val_report = self.context_validator.analyze_chunk(
+                        chunk_text, str(self.file_path), file_content, chunk_start
+                    )
+                    validation_context = val_report.format_summary(max_chars=10000)
+                except Exception as cv_err:
+                    self.logger.debug(f"  Context validation failed: {cv_err}")
+
+            chunk_call_stack = ""
+            if CALL_STACK_AVAILABLE and self.call_stack_analyzer:
+                try:
+                    chunk_call_stack = self.call_stack_analyzer.analyze_chunk(
+                        chunk_text, str(self.file_path), file_content, chunk_start
+                    )
+                except Exception as csa_err:
+                    self.logger.debug(f"  Call stack analysis failed: {csa_err}")
+
+            # --- Assemble context header ---
+            context_header = ""
+            if header_context:
+                context_header += f"\n{header_context}\n"
+            if validation_context:
+                context_header += f"\n{validation_context}\n"
+            if chunk_call_stack:
+                context_header += f"\n{chunk_call_stack}\n"
+
+            # --- Constraints ---
+            prompt_constraints = ""
+            if constraints_context:
+                prompt_constraints = f"""
+                ========================================
+                MANDATORY IDENTIFICATION RULES (IGNORE FALSE POSITIVES)
+                ========================================
+                {constraints_context}
+                ========================================
+                """
+
+            # --- Patch line ranges block ---
+            range_strs = ", ".join(
+                f"{s}-{e}" for s, e in (focus_line_ranges or ranges)
+            )
+            patch_scope_block = f"""
+            ========================================
+            PATCH LINE RANGES (only flag issues on these lines):
+              [{range_strs}]
+            ========================================
+            """
+
+            # --- Final chunk text with context prepended ---
+            final_chunk_text = (
+                f"{context_header}\n"
+                f"// ... [PATCH CHUNK: {filename} Lines {chunk_start}-{chunk_end}] ...\n"
+                f"{numbered_code_block}"
             )
 
-            output_filename = f"patch_{label}_{self.filename_stem}.xlsx"
-            
-            # [FIX] Handle return type variability (Dict vs Str)
-            result = agent.run_analysis(output_filename=output_filename)
-            
-            report_path = ""
-            if isinstance(result, dict):
-                report_path = result.get("report_path") or result.get("excel_path") or ""
-            elif isinstance(result, str):
-                report_path = result
-            
-            if not report_path:
-                 self.logger.warning(f"LLM analysis ({label}) returned no report path.")
-                 return []
+            # --- Build prompt ---
+            final_prompt = f"""
+            {PATCH_REVIEW_PROMPT}
 
-            # Extract issues from the generated Excel
-            return self._extract_issues_from_excel(report_path, label)
-        except Exception as exc:
-            self.logger.warning(f"LLM analysis ({label}) failed: {exc}")
-            if self.verbose:
-                import traceback
-                self.logger.error(traceback.format_exc())
-            return []
+            {prompt_constraints}
 
-    def _extract_issues_from_excel(
-        self, excel_path: str, label: str
-    ) -> List[Dict]:
-        """Extract issues from a generated Excel report."""
-        issues: List[Dict] = []
+            {patch_scope_block}
 
-        if not excel_path or not Path(excel_path).exists():
-            return issues
+            TARGET SOURCE CODE ({filename} - Hunk region {rng_idx+1}/{len(ranges)}):
+            ```cpp
+            {final_chunk_text}
+            ```
+            """
 
-        try:
-            import pandas as pd
-
-            # Try reading the Analysis sheet
+            # --- LLM call ---
             try:
-                df = pd.read_excel(excel_path, sheet_name="Analysis", header=0)
-            except Exception:
-                # Try first sheet if Analysis doesn't exist
-                df = pd.read_excel(excel_path, header=0)
+                response = self.llm_tools.llm_call(final_prompt)
+            except Exception as llm_err:
+                self.logger.warning(f"LLM call failed for {label} chunk {rng_idx+1}: {llm_err}")
+                continue
 
-            # [FIX] Robust column normalization
-            df.columns = [str(c).strip().lower() for c in df.columns]
-            
-            # Map standard keys to dataframe columns
-            col_map = {
-                "file": ["file", "file_path", "filename"],
-                "line": ["line", "line_number", "linenumber"],
-                "severity": ["severity", "level", "priority"],
-                "category": ["category", "issue_type", "type", "rule"],
-                "description": ["description", "message", "desc", "rationale"],
-                "code": ["code", "snippet", "bad_code", "code_snippet"],
-                "fixed_code": ["fixed_code", "suggestion", "fix"]
+            # --- Parse response ---
+            parsed = self._parse_patch_llm_response(
+                response, filename, chunk_text, chunk_start, chunk_line_count
+            )
+            all_issues.extend(parsed)
+
+        return all_issues
+
+    # ------------------------------------------------------------------
+    # Context helpers
+    # ------------------------------------------------------------------
+
+    def _gather_header_context(self, filename: str, file_content: str) -> str:
+        """Resolve #include directives and build header context."""
+        if not HEADER_CTX_AVAILABLE:
+            return ""
+        try:
+            if not hasattr(self, '_header_builder'):
+                config_dict = {}
+                if self.config:
+                    try:
+                        config_dict = {
+                            "include_paths": self.config.get("context.include_paths") or [],
+                            "max_header_depth": self.config.get("context.max_header_depth") or 2,
+                            "max_context_chars": self.config.get("context.max_context_chars") or 6000,
+                            "exclude_system_headers": self.config.get("context.exclude_system_headers", True),
+                        }
+                    except Exception:
+                        pass
+                self._header_builder = HeaderContextBuilder(
+                    codebase_root=str(self.codebase_path),
+                    **config_dict,
+                )
+            includes = self._header_builder.resolve_includes(str(self.file_path))
+            if includes:
+                return self._header_builder.build_context_for_chunk(file_content, includes) or ""
+        except Exception as hdr_err:
+            self.logger.debug(f"  Header context failed: {hdr_err}")
+        return ""
+
+    def _load_constraints_for_file(self, filename: str) -> str:
+        """Load Issue Identification Rules from constraint files."""
+        if not self.constraints_dir.exists():
+            return ""
+        try:
+            # Reuse CodebaseLLMAgent's constraint loader if available
+            if LLM_AGENT_AVAILABLE and hasattr(CodebaseLLMAgent, '_load_constraints'):
+                # Build a lightweight instance just for constraint loading
+                # This is safe — _load_constraints is a pure file-reader
+                dummy = object.__new__(CodebaseLLMAgent)
+                dummy.constraints_dir = self.constraints_dir
+                dummy.custom_constraints = self.custom_constraints
+                dummy.logger = self.logger
+                return dummy._load_constraints(filename, section_keyword="Issue Identification Rules")
+            else:
+                # Fallback: simple regex loader
+                return self._simple_load_constraints(filename)
+        except Exception as exc:
+            self.logger.debug(f"  Constraints load failed: {exc}")
+            return ""
+
+    def _simple_load_constraints(self, filename: str) -> str:
+        """Fallback: load constraints using a simple regex parser."""
+        parts = []
+        if not self.constraints_dir.exists():
+            return ""
+
+        md_files = sorted(self.constraints_dir.glob("*.md"))
+        for custom in (self.custom_constraints or []):
+            p = Path(custom)
+            if p.exists() and p not in md_files:
+                md_files.append(p)
+
+        section_re = re.compile(
+            r"^##\s+Issue Identification Rules",
+            re.IGNORECASE | re.MULTILINE,
+        )
+        for md_path in md_files:
+            try:
+                text = md_path.read_text(encoding="utf-8", errors="replace")
+                m = section_re.search(text)
+                if m:
+                    # Extract from section header to next ## or end
+                    rest = text[m.end():]
+                    next_section = re.search(r"^##\s+", rest, re.MULTILINE)
+                    if next_section:
+                        section_text = rest[:next_section.start()].strip()
+                    else:
+                        section_text = rest.strip()
+                    if section_text:
+                        parts.append(f"// Constraints from {md_path.name}:\n{section_text}")
+            except Exception:
+                continue
+        return "\n\n".join(parts)
+
+    # ------------------------------------------------------------------
+    # LLM response parser (self-contained, matches ---ISSUE--- format)
+    # ------------------------------------------------------------------
+
+    def _parse_patch_llm_response(
+        self, response: str, file_path: str,
+        chunk_text: str, start_line: int, chunk_line_count: int,
+    ) -> List[Dict]:
+        """Parse ``---ISSUE---`` blocks from the LLM response.
+
+        Returns a list of dicts with keys matching the patch agent's
+        expected format: file_path, line_number, severity, category,
+        description, code, fixed_code, source.
+        """
+        issues: List[Dict] = []
+        raw_blocks = response.split("---ISSUE---")
+
+        for block in raw_blocks:
+            block = block.strip()
+            if not block or "No issues found" in block:
+                continue
+
+            patterns = {
+                "Title": r"Title:\s*(.+)",
+                "Severity": r"Severity:\s*(.+)",
+                "Confidence": r"Confidence:\s*(.+)",
+                "Category": r"Category:\s*(.+)",
+                "Description": r"Description:\s*(.+)",
+                "Suggestion": r"Suggestion:\s*(.+)",
             }
 
-            def get_val(row, keys, default=None):
-                for k in keys:
-                    if k in row:
-                        val = row[k]
-                        return val if pd.notna(val) else default
-                return default
+            data: Dict[str, str] = {}
+            for key, pat in patterns.items():
+                m = re.search(pat, block, re.IGNORECASE)
+                data[key] = m.group(1).strip() if m else "N/A"
 
-            for _, row in df.iterrows():
-                file_val = get_val(row, col_map["file"])
-                if not file_val:
-                    continue
+            if data.get("Title") == "N/A":
+                continue
 
-                line_val = get_val(row, col_map["line"], 0)
-                try:
-                    line_num = int(line_val)
-                except (ValueError, TypeError):
-                    line_num = 0
+            # Code snippet
+            code_match = re.search(r"Code:\s*```(?:\w+)?\n(.*?)\n```", block, re.DOTALL)
+            if not code_match:
+                code_match = re.search(r"Code:\s*(.+?)(?=\nFixed_Code:|$)", block, re.DOTALL)
+            raw_code = code_match.group(1).strip() if code_match else ""
 
-                issue = {
-                    "file_path": str(file_val),
-                    "line_number": line_num,
-                    "severity": str(get_val(row, col_map["severity"], "medium")),
-                    "category": str(get_val(row, col_map["category"], "")),
-                    "description": str(get_val(row, col_map["description"], "")),
-                    "code": str(get_val(row, col_map["code"], "")),
-                    "fixed_code": str(get_val(row, col_map["fixed_code"], "")),
-                    "source": label,
-                }
-                issues.append(issue)
+            # Fixed code
+            fixed_match = re.search(r"Fixed_Code:\s*```(?:\w+)?\n(.*?)\n```", block, re.DOTALL)
+            if not fixed_match:
+                fixed_match = re.search(r"Fixed_Code:\s*(.+?)(?=$)", block, re.DOTALL)
+            fixed_code = fixed_match.group(1).strip() if fixed_match else ""
 
-        except ImportError:
-            self.logger.warning("pandas not available — cannot extract issues from Excel")
-        except Exception as exc:
-            self.logger.warning(f"Failed to extract issues from {excel_path}: {exc}")
+            # --- Anchor logic: resolve line number ---
+            calculated_line = 0
+            found_by_anchor = False
+            if raw_code:
+                idx = chunk_text.find(raw_code)
+                if idx == -1:
+                    first_line = raw_code.split('\n')[0].strip()
+                    if len(first_line) > 10:
+                        idx = chunk_text.find(first_line)
+                if idx != -1:
+                    newlines_before = chunk_text[:idx].count('\n')
+                    calculated_line = start_line + newlines_before
+                    found_by_anchor = True
+
+            if not found_by_anchor:
+                line_match = re.search(r"Line\D*(\d+)", block, re.IGNORECASE)
+                if line_match:
+                    raw_val = int(line_match.group(1))
+                    if raw_val < chunk_line_count and raw_val < start_line:
+                        calculated_line = start_line + raw_val - 1
+                    else:
+                        calculated_line = raw_val
+                else:
+                    calculated_line = start_line
+
+            issues.append({
+                "file_path": file_path,
+                "line_number": calculated_line,
+                "severity": data.get("Severity", "medium").lower(),
+                "category": data.get("Category", ""),
+                "description": data.get("Description", ""),
+                "code": raw_code,
+                "fixed_code": fixed_code,
+                "source": f"patch_llm",
+            })
 
         return issues
 
@@ -581,11 +858,27 @@ class CodebasePatchAgent:
     # ------------------------------------------------------------------
 
     def _run_static_analysis(
-        self, temp_dir: str, filename: str
+        self, temp_dir: str, filename: str,
+        focus_line_ranges: Optional[List[tuple]] = None,
     ) -> List[Dict]:
-        """Run static analysis adapters on the patched file."""
+        """Run static analysis adapters on the patched file.
+
+        When ``focus_line_ranges`` is provided, only findings whose line
+        number falls within one of the (start, end) ranges are kept.
+        This prevents the adapters (which always scan the whole file)
+        from flooding the output with pre-existing issues.
+        """
         if not ADAPTERS_AVAILABLE:
             return []
+
+        def _in_focus(line: int) -> bool:
+            """Return True if *line* falls within any focus range."""
+            if not focus_line_ranges:
+                return True  # no filter → keep everything
+            for fstart, fend in focus_line_ranges:
+                if fstart <= line <= fend:
+                    return True
+            return False
 
         issues: List[Dict] = []
         try:
@@ -609,11 +902,24 @@ class CodebasePatchAgent:
                         file_cache, ccls_navigator=None, dependency_graph={}
                     )
                     if result.get("tool_available", False):
-                        # Extract issues from adapter results
-                        for finding in result.get("findings", result.get("issues", [])):
+                        # Extract issues from adapter results — use 'details'
+                        # (per-finding dicts from BaseStaticAdapter._make_detail)
+                        # falling back to 'findings' / 'issues' for compat.
+                        raw_findings = (
+                            result.get("details")
+                            or result.get("findings")
+                            or result.get("issues", [])
+                        )
+                        for finding in raw_findings:
+                            if not isinstance(finding, dict):
+                                continue
+                            line_num = finding.get("line", 0)
+                            # --- Patch scope filter ---
+                            if not _in_focus(line_num):
+                                continue
                             issues.append({
                                 "file_path": finding.get("file", filename),
-                                "line_number": finding.get("line", 0),
+                                "line_number": line_num,
                                 "severity": finding.get("severity", "medium"),
                                 "category": f"static_{name}",
                                 "description": finding.get("description", finding.get("message", "")),
@@ -628,6 +934,9 @@ class CodebasePatchAgent:
         except Exception as exc:
             self.logger.warning(f"Static analysis failed: {exc}")
 
+        self.logger.info(
+            f"  Static adapters: {len(issues)} issue(s) after patch-scope filtering"
+        )
         return issues
 
     # ------------------------------------------------------------------
@@ -658,13 +967,17 @@ class CodebasePatchAgent:
         """Identify issues that are NEW in the patched version.
 
         An issue is considered 'new' if it:
-        1. Was NOT present in the original (by fingerprint), OR
-        2. Falls within or near a hunk's modified line range.
+        1. Falls within or near a hunk's modified line range, AND
+        2. Was NOT present in the original (by fingerprint).
+
+        This ensures we ONLY report issues that:
+        (a) are in regions actually touched by the patch, and
+        (b) did not already exist before the patch was applied.
         """
         # Build fingerprint set from original
         orig_fingerprints = {self._fingerprint_issue(i) for i in original_issues}
 
-        # Build a set of line ranges modified by hunks
+        # Build a set of line ranges modified by hunks (in the NEW/patched file)
         modified_ranges: List[Tuple[int, int]] = []
         for hunk in hunks:
             start = hunk.new_start
@@ -684,20 +997,28 @@ class CodebasePatchAgent:
             fp = self._fingerprint_issue(issue)
             line_num = issue.get("line_number", 0)
 
-            # Issue is new if not in original OR in a modified range
-            if fp not in orig_fingerprints or _in_modified_range(line_num):
-                finding = PatchFinding(
-                    file_path=issue.get("file_path", self.filename),
-                    line_number=line_num,
-                    severity=issue.get("severity", "medium"),
-                    category=issue.get("category", ""),
-                    description=issue.get("description", ""),
-                    code_before=issue.get("code", ""),
-                    code_after=issue.get("fixed_code", ""),
-                    introduced_by_patch=True,
-                    issue_source=issue.get("source", "patch"),
-                )
-                new_findings.append(finding)
+            # GATE 1: Issue MUST be in or near a modified hunk range.
+            # This is the primary filter — ignore everything outside
+            # the patch region regardless of fingerprint matching.
+            if not _in_modified_range(line_num):
+                continue
+
+            # GATE 2: Issue must NOT have existed in the original file.
+            if fp in orig_fingerprints:
+                continue
+
+            finding = PatchFinding(
+                file_path=issue.get("file_path", self.filename),
+                line_number=line_num,
+                severity=issue.get("severity", "medium"),
+                category=issue.get("category", ""),
+                description=issue.get("description", ""),
+                code_before=issue.get("code", ""),
+                code_after=issue.get("fixed_code", ""),
+                introduced_by_patch=True,
+                issue_source=issue.get("source", "patch"),
+            )
+            new_findings.append(finding)
 
         return new_findings
 

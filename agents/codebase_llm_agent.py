@@ -631,7 +631,7 @@ class CodebaseLLMAgent:
                         val_report = self.context_validator.analyze_chunk(
                             chunk_text, str(file_path), code_content, start_line
                         )
-                        validation_context = val_report.format_summary(max_chars=800)
+                        validation_context = val_report.format_summary(max_chars=10000)
                         if validation_context:
                             logger.debug(
                                 f"    Validation context for chunk {chunk_idx+1}: "

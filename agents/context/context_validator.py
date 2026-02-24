@@ -177,7 +177,7 @@ class ValidationReport:
     start_line: int
     validations: Dict[str, ValidationResult] = field(default_factory=dict)
 
-    def format_summary(self, max_chars: int = 800) -> str:
+    def format_summary(self, max_chars: int = 10000) -> str:
         """Format as compact C-comment block for prompt injection."""
         if not self.validations:
             return ""
@@ -194,24 +194,24 @@ class ValidationReport:
 
         if ptrs:
             lines.append("// Pointers:")
-            for v in ptrs[:8]:
+            for v in ptrs[:50]:
                 flag = " — FLAG if unchecked" if v.recommendation == "FLAG" else ""
                 lines.append(f"//   {v.symbol_name:16s} -> {v.status} ({v.location}){flag}")
 
         if bounds:
             lines.append("// Array Bounds:")
-            for v in bounds[:8]:
+            for v in bounds[:50]:
                 lines.append(f"//   {v.symbol_name:16s} -> {v.status} ({v.location})")
 
         if returns:
             lines.append("// Return Values:")
-            for v in returns[:5]:
+            for v in returns[:30]:
                 flag = " — FLAG if unchecked" if v.recommendation == "FLAG" else ""
                 lines.append(f"//   {v.symbol_name:16s} -> {v.status} ({v.location}){flag}")
 
         if chains:
             lines.append("// Chained Derefs:")
-            for v in chains[:5]:
+            for v in chains[:30]:
                 lines.append(f"//   {v.symbol_name:16s} -> {v.status} ({v.location})")
 
         lines.append("// ── END VALIDATION ─────────────────────────────────")

@@ -299,6 +299,12 @@ Examples:
         default=None,
         help="Path to the original source file being patched (used with --patch-file)",
     )
+    parser.add_argument(
+        "--patch-codebase-path",
+        default=None,
+        help="Root of the codebase for header/context resolution during patch analysis "
+             "(defaults to parent directory of --patch-target)",
+    )
 
     parser.add_argument(
         "--use-incremental",
@@ -1370,6 +1376,7 @@ def main():
                     exclude_dirs=opts.get("exclude_dirs", []),
                     exclude_globs=opts.get("exclude_globs", []),
                     custom_constraints=opts.get("include_custom_constraints", []),
+                    codebase_path=opts.get("patch_codebase_path") or opts.get("codebase_path"),
                 )
 
                 excel_path = os.path.join(opts.get("out_dir", "./out"), "detailed_code_review.xlsx")

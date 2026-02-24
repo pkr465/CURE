@@ -881,6 +881,7 @@ def run_patch_analysis_background(
             exclude_dirs=config.get("exclude_dirs", []),
             exclude_globs=config.get("exclude_globs", []),
             custom_constraints=config.get("custom_constraints", []),
+            codebase_path=config.get("codebase_path"),
         )
 
         excel_path = os.path.join(output_dir, "detailed_code_review.xlsx")

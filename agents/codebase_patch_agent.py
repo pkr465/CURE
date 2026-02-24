@@ -154,6 +154,7 @@ class CodebasePatchAgent:
         exclude_dirs: Optional[List[str]] = None,
         exclude_globs: Optional[List[str]] = None,
         custom_constraints: Optional[List[str]] = None,
+        codebase_path: Optional[str] = None,
     ) -> None:
         self.file_path = Path(file_path).resolve()
         self.patch_file = Path(patch_file).resolve()
@@ -167,6 +168,15 @@ class CodebasePatchAgent:
         self.exclude_dirs = exclude_dirs or []
         self.exclude_globs = exclude_globs or []
         self.custom_constraints = custom_constraints or []
+
+        # Context codebase path — the REAL codebase root used by the inner
+        # CodebaseLLMAgent for header resolution, context validation, and
+        # call-stack analysis.  Without this, those layers would only see the
+        # single file in the temp directory and produce no useful context.
+        if codebase_path:
+            self.codebase_path = Path(codebase_path).resolve()
+        else:
+            self.codebase_path = self.file_path.parent
 
         # Derive useful names
         self.filename = self.file_path.name
@@ -434,6 +444,14 @@ class CodebasePatchAgent:
     ) -> List[Dict]:
         """Run CodebaseLLMAgent on a single file in a temp directory.
 
+        Uses the *real* codebase path (``self.codebase_path``) so that the
+        inner agent's 4-layer context pipeline (header context, context
+        validation, call-stack analysis, constraints) can see the full
+        codebase.  The temp file is passed via an absolute
+        ``file_to_fix`` so the agent analyses the correct version
+        (original or patched) while still resolving includes and call
+        graphs against the real codebase.
+
         Returns a list of issue dicts extracted from the agent's results.
         """
         if not LLM_AGENT_AVAILABLE:
@@ -443,17 +461,22 @@ class CodebasePatchAgent:
             analysis_out = os.path.join(self._temp_dir, f"llm_{label}")
             os.makedirs(analysis_out, exist_ok=True)
 
-            # [CONSTRAINT UPDATE]: Pass the specific constraints directory to the LLM agent.
-            # CodebaseLLMAgent uses 'Issue Identification Rules' by default.
+            # Use the ABSOLUTE path to the temp file so CodebaseLLMAgent's
+            # _gather_files() picks it up directly (absolute paths bypass
+            # codebase_path resolution).  Meanwhile, codebase_path points
+            # at the real codebase so HeaderContextBuilder, ContextValidator,
+            # and StaticCallStackAnalyzer index the full project.
+            temp_file_abs = str(Path(temp_dir).resolve() / filename)
+
             agent = CodebaseLLMAgent(
-                codebase_path=temp_dir,
+                codebase_path=str(self.codebase_path),
                 output_dir=analysis_out,
                 config=self.config,
                 llm_tools=self.llm_tools,
                 exclude_dirs=self.exclude_dirs,
                 exclude_globs=self.exclude_globs,
                 max_files=1,
-                file_to_fix=filename,
+                file_to_fix=temp_file_abs,
                 hitl_context=self.hitl_context,
                 constraints_dir=str(self.constraints_dir),
                 custom_constraints=self.custom_constraints,
@@ -926,6 +949,12 @@ if __name__ == "__main__":
         help="Additional constraint .md files to load",
     )
     parser.add_argument(
+        "--codebase-path",
+        default=None,
+        help="Root of the codebase for header/context/call-stack resolution "
+             "(defaults to parent directory of --file-path)",
+    )
+    parser.add_argument(
         "-v", "--verbose",
         action="store_true",
         default=False,
@@ -972,6 +1001,7 @@ if __name__ == "__main__":
         exclude_dirs=exclude_dirs,
         exclude_globs=exclude_globs,
         custom_constraints=args.include_custom_constraints,
+        codebase_path=args.codebase_path,
     )
 
     result = agent.run_analysis(excel_path=args.excel_path)

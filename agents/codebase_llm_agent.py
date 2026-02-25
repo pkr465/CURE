@@ -2,6 +2,7 @@ import fnmatch
 import os
 import re
 import json
+import time
 import uuid
 import logging
 from datetime import datetime
@@ -116,6 +117,8 @@ class CodebaseLLMAgent:
         hitl_context: Optional['HITLContext'] = None,
         constraints_dir: str = "agents/constraints",
         custom_constraints: Optional[List[str]] = None,
+        telemetry=None,
+        telemetry_run_id: Optional[str] = None,
     ):
         """
         Initialize CodebaseLLMAgent with dependency injection support.
@@ -133,6 +136,8 @@ class CodebaseLLMAgent:
         :param hitl_context: Optional HITLContext for human-in-the-loop feedback integration.
         :param constraints_dir: Path to the constraints directory (default: agents/constraints).
         :param custom_constraints: Additional custom constraint .md file paths to include.
+        :param telemetry: Optional TelemetryService for per-call logging.
+        :param telemetry_run_id: Run ID for telemetry correlation.
         """
         self.config = config or GlobalConfig()
         self.codebase_path = Path(codebase_path).resolve()
@@ -152,6 +157,10 @@ class CodebaseLLMAgent:
         self.start_time = datetime.now()
         self.use_ccls = use_ccls
         self.file_to_fix = file_to_fix
+
+        # Telemetry (optional — fire-and-forget)
+        self._telemetry = telemetry
+        self._telemetry_run_id = telemetry_run_id
 
         # Constraint Directory Setup
         self.constraints_dir = Path(constraints_dir)
@@ -426,6 +435,18 @@ class CodebaseLLMAgent:
         # ---------------------------------------------------------
         # 3. Return Combined Result
         # ---------------------------------------------------------
+        # Track which constraint sources were loaded for telemetry
+        sources = []
+        if (base_dir / "common_constraints.md").exists():
+            sources.append("common_constraints.md")
+        if (base_dir / "codebase_constraints.md").exists():
+            sources.append("codebase_constraints.md")
+        for cp in self.custom_constraints:
+            sources.append(str(Path(cp).name))
+        if specific_file_path and specific_file_path.exists():
+            sources.append(specific_file_path.name)
+        self._constraint_files_used = ", ".join(sources) if sources else "none"
+
         if not combined_constraints:
             return ""
 
@@ -750,6 +771,19 @@ class CodebaseLLMAgent:
                 if self.hitl_context:
                     if self.hitl_context.should_skip_issue("code_quality", rel_path):
                         logger.debug("HITL: skipping %s (marked skip in feedback)", rel_path)
+                        # Log constraint hit for HITL suppression
+                        if self._telemetry and self._telemetry_run_id:
+                            try:
+                                self._telemetry.log_constraint_hit(
+                                    run_id=self._telemetry_run_id,
+                                    constraint_source="hitl_feedback",
+                                    constraint_rule="should_skip_issue",
+                                    file_path=rel_path,
+                                    issue_type="code_quality",
+                                    action="hitl_suppressed",
+                                )
+                            except Exception:
+                                pass
                         continue
 
                 # 4. LLM Call
@@ -763,6 +797,19 @@ class CodebaseLLMAgent:
                     {constraints_context}
                     ========================================
                     """
+                    # Log constraint application
+                    if self._telemetry and self._telemetry_run_id:
+                        try:
+                            self._telemetry.log_constraint_hit(
+                                run_id=self._telemetry_run_id,
+                                constraint_source=getattr(self, '_constraint_files_used', 'constraints'),
+                                constraint_rule="identification_rules",
+                                file_path=rel_path,
+                                issue_type="code_quality",
+                                action="modified",
+                            )
+                        except Exception:
+                            pass
 
                 final_prompt = f"""
                 {CODEBASE_ANALYSIS_PROMPT}
@@ -783,6 +830,19 @@ class CodebaseLLMAgent:
                         file_path=rel_path,
                         agent_type="llm_agent",
                     )
+                    # Log HITL prompt augmentation as constraint hit
+                    if self._telemetry and self._telemetry_run_id:
+                        try:
+                            self._telemetry.log_constraint_hit(
+                                run_id=self._telemetry_run_id,
+                                constraint_source="hitl_feedback",
+                                constraint_rule="prompt_augmentation",
+                                file_path=rel_path,
+                                issue_type="code_quality",
+                                action="hitl_suppressed",
+                            )
+                        except Exception:
+                            pass
 
                 # ── Debug: dump prompt + chunk to {output_dir}/prompt_dumps/ ──
                 if logger.isEnabledFor(logging.DEBUG):
@@ -800,7 +860,35 @@ class CodebaseLLMAgent:
                     except Exception:
                         pass  # never fail on debug dump
 
+                _llm_start = time.time()
                 response = self.llm_tools.llm_call(final_prompt)
+                _llm_ms = int((time.time() - _llm_start) * 1000)
+
+                # Telemetry: log per-call LLM usage
+                if self._telemetry and self._telemetry_run_id:
+                    try:
+                        _usage = getattr(response, "usage", None) or {}
+                        if isinstance(_usage, dict):
+                            _pt = _usage.get("input_tokens") or _usage.get("prompt_tokens") or 0
+                            _ct = _usage.get("output_tokens") or _usage.get("completion_tokens") or 0
+                        else:
+                            _pt = getattr(_usage, "input_tokens", 0) or 0
+                            _ct = getattr(_usage, "output_tokens", 0) or 0
+                        _provider = (self.llm_tools.provider if hasattr(self.llm_tools, "provider") else "")
+                        _model = (self.llm_tools.model if hasattr(self.llm_tools, "model") else "")
+                        self._telemetry.log_llm_call_detailed(
+                            run_id=self._telemetry_run_id,
+                            provider=_provider,
+                            model=_model,
+                            purpose="analysis",
+                            file_path=rel_path,
+                            chunk_index=chunk_idx,
+                            prompt_tokens=int(_pt),
+                            completion_tokens=int(_ct),
+                            latency_ms=_llm_ms,
+                        )
+                    except Exception:
+                        pass  # never fail on telemetry
 
                 # 5. Parsing
                 parsed_issues = self._parse_llm_response(

@@ -54,7 +54,13 @@ def _get_telemetry():
         conn_str = gc.get("POSTGRES_CONNECTION")
         if conn_str:
             from db.telemetry_service import TelemetryService
-            _telemetry_service = TelemetryService(connection_string=conn_str)
+            _telemetry_service = TelemetryService(
+                connection_string=conn_str,
+                pool_size=gc.get_int("database.pool_size", 5),
+                pool_recycle=gc.get_int("database.pool_recycle", 3600),
+                pool_timeout=gc.get_int("database.pool_timeout", 30),
+                pool_pre_ping=gc.get_bool("database.pool_pre_ping", True),
+            )
             return _telemetry_service
     except Exception as exc:
         logger.debug("Telemetry not available: %s", exc)
@@ -314,6 +320,13 @@ def run_analysis_background(
         except Exception:
             pass
 
+        # Inject UI exclude_headers into global_config context section
+        ui_exclude_headers = config.get("exclude_headers", [])
+        if global_config and ui_exclude_headers:
+            ctx_data = global_config._data.setdefault("context", {})
+            existing = ctx_data.get("exclude_headers", []) or []
+            ctx_data["exclude_headers"] = list(dict.fromkeys(existing + ui_exclude_headers))
+
         # Initialize LLMTools (router auto-selects provider from config)
         llm_tools = None
         if config.get("use_llm", True):
@@ -367,6 +380,8 @@ def run_analysis_background(
                 file_to_fix=config.get("file_to_fix"),
                 hitl_context=hitl_context,
                 custom_constraints=config.get("custom_constraints", []),
+                telemetry=telemetry,
+                telemetry_run_id=run_id,
             )
 
             phase_statuses[1] = "completed"
@@ -528,11 +543,49 @@ def run_analysis_background(
             duration = time.time() - start_time
             results = result_store.get("analysis_results", [])
             issues_total = len(results) if isinstance(results, list) else 0
+
+            # Log individual findings to telemetry_findings
+            sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+            if isinstance(results, list):
+                for finding in results:
+                    if isinstance(finding, dict):
+                        sev = (finding.get("severity") or "").upper()
+                        if sev in sev_counts:
+                            sev_counts[sev] += 1
+                        telemetry.log_finding(
+                            run_id=run_id,
+                            file_path=finding.get("file_path") or finding.get("File"),
+                            line_start=finding.get("line_start") or finding.get("Line start"),
+                            title=finding.get("title") or finding.get("Title"),
+                            category=finding.get("category") or finding.get("Category"),
+                            severity=finding.get("severity") or finding.get("Severity"),
+                            confidence=finding.get("confidence") or finding.get("Confidence"),
+                            description=finding.get("description") or finding.get("Description"),
+                            suggestion=finding.get("suggestion") or finding.get("Suggestion"),
+                            code_snippet=finding.get("code") or finding.get("Code"),
+                            fixed_code=finding.get("fixed_code") or finding.get("Fixed_Code"),
+                        )
+
+            # Log static analysis adapter results
+            adapter_results = result_store.get("adapter_results", {})
+            if isinstance(adapter_results, dict):
+                for adapter_name, adapter_data in adapter_results.items():
+                    if isinstance(adapter_data, list):
+                        telemetry.log_static_analysis(
+                            run_id=run_id,
+                            adapter_name=adapter_name,
+                            findings_count=len(adapter_data),
+                        )
+
             telemetry.finish_run(
                 run_id=run_id,
                 status="completed",
                 files_analyzed=config.get("max_files", 0),
                 issues_total=issues_total,
+                issues_critical=sev_counts.get("CRITICAL", 0),
+                issues_high=sev_counts.get("HIGH", 0),
+                issues_medium=sev_counts.get("MEDIUM", 0),
+                issues_low=sev_counts.get("LOW", 0),
                 duration_seconds=duration,
                 metadata={"use_ccls": config.get("use_ccls", False)},
             )
@@ -669,6 +722,8 @@ def run_fixer_background(
             llm_tools=llm_tools,
             dry_run=dry_run,
             verbose=config.get("debug_mode", False),
+            telemetry=telemetry,
+            telemetry_run_id=run_id,
         )
 
         phase_statuses[1] = "completed"
@@ -699,9 +754,28 @@ def run_fixer_background(
         if telemetry and run_id:
             duration = time.time() - start_time
             fr = fixer_result or {}
+
+            # Log each fix result to telemetry_findings
+            audit_trail = fr.get("audit_trail") or fr.get("results") or []
+            if isinstance(audit_trail, list):
+                for item in audit_trail:
+                    if isinstance(item, dict):
+                        telemetry.log_finding(
+                            run_id=run_id,
+                            file_path=item.get("file_path") or item.get("File"),
+                            line_start=item.get("line_start") or item.get("Line start"),
+                            title=item.get("title") or item.get("Title"),
+                            category=item.get("category") or item.get("Category"),
+                            severity=item.get("severity") or item.get("Severity"),
+                            fixed_code=item.get("fixed_code") or item.get("Fixed_Code"),
+                            metadata={"fix_status": item.get("status", "unknown")},
+                        )
+
+            issues_total = fr.get("fixed_count", 0) + fr.get("skipped_count", 0) + fr.get("failed_count", 0)
             telemetry.finish_run(
                 run_id=run_id,
                 status="completed",
+                issues_total=issues_total,
                 issues_fixed=fr.get("fixed_count", 0),
                 issues_skipped=fr.get("skipped_count", 0),
                 issues_failed=fr.get("failed_count", 0),
@@ -847,6 +921,13 @@ def run_patch_analysis_background(
         except Exception:
             pass
 
+        # Inject UI exclude_headers into global_config context section
+        ui_exclude_headers = config.get("exclude_headers", [])
+        if global_config and ui_exclude_headers:
+            ctx_data = global_config._data.setdefault("context", {})
+            existing = ctx_data.get("exclude_headers", []) or []
+            ctx_data["exclude_headers"] = list(dict.fromkeys(existing + ui_exclude_headers))
+
         # Initialize LLM
         llm_tools = None
         try:
@@ -882,6 +963,8 @@ def run_patch_analysis_background(
             exclude_globs=config.get("exclude_globs", []),
             custom_constraints=config.get("custom_constraints", []),
             codebase_path=config.get("codebase_path"),
+            telemetry=telemetry,
+            telemetry_run_id=run_id,
         )
 
         excel_path = os.path.join(output_dir, "detailed_code_review.xlsx")
@@ -909,11 +992,51 @@ def run_patch_analysis_background(
         # Finalize telemetry
         if telemetry and run_id:
             pr = patch_result or {}
+
+            # Log individual findings
+            findings = pr.get("findings") or []
+            sev_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+            if isinstance(findings, list):
+                for finding in findings:
+                    if isinstance(finding, dict):
+                        sev = (finding.get("severity") or finding.get("Severity") or "").upper()
+                        if sev in sev_counts:
+                            sev_counts[sev] += 1
+                        telemetry.log_finding(
+                            run_id=run_id,
+                            file_path=finding.get("file_path") or finding.get("File"),
+                            line_start=finding.get("line_start") or finding.get("Line start"),
+                            title=finding.get("title") or finding.get("Title"),
+                            category=finding.get("category") or finding.get("Category"),
+                            severity=finding.get("severity") or finding.get("Severity"),
+                            confidence=finding.get("confidence") or finding.get("Confidence"),
+                            description=finding.get("description") or finding.get("Description"),
+                            suggestion=finding.get("suggestion") or finding.get("Suggestion"),
+                            code_snippet=finding.get("code") or finding.get("Code"),
+                            fixed_code=finding.get("fixed_code") or finding.get("Fixed_Code"),
+                            metadata={"mode": "patch"},
+                        )
+
+            # Log static analysis adapter results if present
+            adapter_results = pr.get("adapter_results") or {}
+            if isinstance(adapter_results, dict):
+                for adapter_name, adapter_data in adapter_results.items():
+                    if isinstance(adapter_data, list):
+                        telemetry.log_static_analysis(
+                            run_id=run_id,
+                            adapter_name=adapter_name,
+                            findings_count=len(adapter_data),
+                        )
+
             telemetry.finish_run(
                 run_id=run_id,
                 status="completed",
                 files_analyzed=1,
                 issues_total=pr.get("new_issue_count", 0),
+                issues_critical=sev_counts.get("CRITICAL", 0),
+                issues_high=sev_counts.get("HIGH", 0),
+                issues_medium=sev_counts.get("MEDIUM", 0),
+                issues_low=sev_counts.get("LOW", 0),
                 duration_seconds=time.time() - start_time,
             )
 

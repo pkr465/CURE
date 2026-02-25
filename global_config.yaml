@@ -127,6 +127,19 @@ database:
   embedding_tablename: langchain_pg_embedding
   store_name: codebase_analytics_vector_db
 
+  # Connection pool tuning
+  pool_size: 5              # Number of persistent connections in the pool
+  pool_recycle: 3600        # Seconds before recycling a connection
+  pool_timeout: 30          # Seconds to wait for a pool connection
+  pool_pre_ping: true       # Verify connections before use (recommended)
+
+  # SSL/TLS — For remote servers. Set ssl_mode to 'require' or higher for production.
+  # Modes: disable | allow | prefer | require | verify-ca | verify-full
+  ssl_mode: prefer
+  ssl_ca: ""                # Path to CA certificate (for verify-ca / verify-full)
+  ssl_cert: ""              # Path to client certificate
+  ssl_key: ""               # Path to client private key
+
   # Vector DB backend
   vector_database: postgres # postgres | chroma | pinecone
 

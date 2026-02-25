@@ -99,7 +99,9 @@ class CodebaseFixerAgent:
         dry_run: bool = False,
         verbose: bool = False,
         hitl_context: Optional['HITLContext'] = None,
-        constraints_dir: str = "agents/constraints"
+        constraints_dir: str = "agents/constraints",
+        telemetry=None,
+        telemetry_run_id: Optional[str] = None,
     ):
         self.codebase_root = Path(codebase_root).resolve()
         self.directives_path = Path(directives_file).resolve()
@@ -113,6 +115,10 @@ class CodebaseFixerAgent:
         self.dry_run = dry_run
         self.verbose = verbose
         self.hitl_context = hitl_context
+
+        # Telemetry (optional)
+        self._telemetry = telemetry
+        self._telemetry_run_id = telemetry_run_id
 
         # Audit trail for detailed tracking of every decision
         self.audit_trail: List[Dict] = []
@@ -452,13 +458,69 @@ class CodebaseFixerAgent:
                 )
 
                 coding_model = self.config.get("llm.coding_model") if self.config else None
+                _llm_t0 = time.time()
                 llm_response = self.llm_tools.llm_call(prompt, model=coding_model)
+                _llm_ms = int((time.time() - _llm_t0) * 1000)
+
+                # Telemetry: per-call LLM logging
+                if self._telemetry and self._telemetry_run_id:
+                    try:
+                        _usage = getattr(llm_response, "usage", None) or {}
+                        if isinstance(_usage, dict):
+                            _pt = _usage.get("input_tokens") or _usage.get("prompt_tokens") or 0
+                            _ct = _usage.get("output_tokens") or _usage.get("completion_tokens") or 0
+                        else:
+                            _pt = getattr(_usage, "input_tokens", 0) or 0
+                            _ct = getattr(_usage, "output_tokens", 0) or 0
+                        _provider = getattr(self.llm_tools, "provider", "")
+                        _model = getattr(self.llm_tools, "model", "")
+                        self._telemetry.log_llm_call_detailed(
+                            run_id=self._telemetry_run_id,
+                            provider=_provider,
+                            model=_model,
+                            purpose="fix",
+                            file_path=filename,
+                            chunk_index=i,
+                            prompt_tokens=int(_pt),
+                            completion_tokens=int(_ct),
+                            latency_ms=_llm_ms,
+                        )
+                    except Exception:
+                        pass  # never fail on telemetry
+
                 fixed_chunk = self._extract_code_from_response(llm_response)
 
                 duration = round(time.time() - start_chunk_time, 1)
 
                 if fixed_chunk:
-                    # Truncation check
+                    # ── Structural validation (compilation safety net) ──
+                    struct_valid, struct_msg = self._validate_code_structure(chunk_text, fixed_chunk)
+                    if not struct_valid:
+                        self.logger.warning(
+                            f"Structure validation FAILED — reverting chunk {i+1}: {struct_msg}"
+                        )
+                        final_pieces.append(chunk_text)
+                        prev_chunk_tail = self._get_tail_context(chunk_text)
+                        for t in chunk_tasks:
+                            processed_results.append({
+                                **t,
+                                "final_status": "STRUCTURE_FAIL",
+                                "details": f"Structure validation failed: {struct_msg}",
+                            })
+                            self._audit_decision(
+                                t, "STRUCTURE_FAIL",
+                                f"Chunk {i+1}: {struct_msg}",
+                            )
+                        continue
+                    if struct_msg:
+                        self.logger.warning(f"Structure warnings (chunk {i+1}): {struct_msg}")
+
+                    # ── Diff validation (advisory — never rejects) ──
+                    diff_msg = self._validate_fix_diff(chunk_text, fixed_chunk, filename)
+                    if diff_msg:
+                        self.logger.warning(f"Diff warnings (chunk {i+1}): {diff_msg}")
+
+                    # ── Truncation check ──
                     if len(fixed_chunk) < len(chunk_text) * 0.4:
                         self.logger.warning(f"Failed (Truncated Response).")
                         final_pieces.append(chunk_text)
@@ -470,7 +532,12 @@ class CodebaseFixerAgent:
                         self.logger.info(f"Done in {duration}s.")
 
                         for t in chunk_tasks:
-                            processed_results.append({**t, "final_status": "FIXED", "details": f"Fixed in Chunk {i+1}"})
+                            details_str = f"Fixed in Chunk {i+1}"
+                            if struct_msg:
+                                details_str += f" [WARN: {struct_msg}]"
+                            if diff_msg:
+                                details_str += f" [WARN: {diff_msg}]"
+                            processed_results.append({**t, "final_status": "FIXED", "details": details_str})
                             self._audit_decision(
                                 t, "FIXED",
                                 f"Fixed in chunk {i+1} ({duration}s)",
@@ -642,7 +709,66 @@ class CodebaseFixerAgent:
             return "\n".join(lines[-self.CONTEXT_OVERLAP_LINES:])
         return text
 
-    def _construct_refactor_prompt(self, filename: str, content: str, issues: List[Dict], 
+    def _construct_code_integrity_rules(self) -> str:
+        """
+        Generate explicit code integrity rules for the LLM prompt.
+        These rules address critical compilation-breaking bugs observed in
+        previous LLM-generated fixes: newline removal, argument mismatches,
+        type declaration removal, incorrect macro usage, and assert errors.
+        """
+        return """
+    ========== CRITICAL CODE INTEGRITY RULES (COMPILATION SAFETY) ==========
+    Violating ANY of these rules will cause compilation failures. Follow ALL rules strictly.
+
+    RULE 1 — PRESERVE BLANK LINES AND FORMATTING:
+    - DO NOT remove blank lines between functions, after closing braces '}', or between code blocks.
+    - If the original code has a blank line after '}', the fixed code MUST also have that blank line.
+    - Blank lines are structural separators — removing them merges lines and causes syntax errors.
+    - BAD:  '}\\nvoid foo() {'   (merged — will NOT compile)
+    - GOOD: '}\\n\\nvoid foo() {' (preserved — compiles correctly)
+
+    RULE 2 — FUNCTION SIGNATURE CONSISTENCY:
+    - If you modify a function CALL by adding or removing arguments, you MUST also update the
+      function DEFINITION/DECLARATION in the same chunk to match.
+    - Count the arguments BEFORE and AFTER your fix — they MUST be identical between calls and definitions.
+    - DO NOT add arguments to function calls without updating the corresponding function definition.
+    - If the function definition is outside this chunk, do NOT add extra arguments to the call.
+
+    RULE 3 — PRESERVE VARIABLE TYPE DECLARATIONS:
+    - In for-loop initializers like 'for (int i = 0; i < N; i++)', the type 'int' is MANDATORY for compilation.
+    - DO NOT remove the type declaration from for-loop variables.
+    - DO NOT transform 'for (int i = 1; i < X; i++)' into 'for (i = (A_UINT32)1; i < X; i++)'.
+    - The type declaration in the for-loop initializer is a variable definition — removing it causes
+      'undeclared identifier' compilation errors unless the variable is declared elsewhere.
+
+    RULE 4 — MACRO AVAILABILITY:
+    - DO NOT use macros like A_ARRAY_SIZE(arr), ARRAY_SIZE(arr), or similar unless you can see them
+      defined in the code chunk, included headers, or the EXTERNAL DEFINITIONS context provided.
+    - For array sizing, always prefer the standard C/C++ idiom: sizeof(arr) / sizeof(arr[0])
+    - Application-specific macros (A_*, QDF_*, OL_*, etc.) may not be visible to the compiler
+      in this translation unit. Use only standard C/C++ constructs when in doubt.
+
+    RULE 5 — ASSERT AND MACRO ARGUMENT COUNTS:
+    - A_COMPILE_TIME_ASSERT requires exactly 2 arguments: A_COMPILE_TIME_ASSERT(condition, message_string)
+    - WRONG:   A_COMPILE_TIME_ASSERT(sizeof(x) == 4)          — missing second argument
+    - CORRECT: A_COMPILE_TIME_ASSERT(sizeof(x) == 4, "size check failed")
+    - When in doubt, use standard C++11 static_assert(condition, "message") instead of custom macros.
+    - Before using ANY macro, verify its expected argument count from the visible definitions.
+
+    RULE 6 — DO NOT ADD UNNECESSARY TYPE CASTS:
+    - DO NOT add casts like (A_UINT32), (uint32_t), (int) to numeric literals unless there is a
+      specific type mismatch warning being fixed.
+    - Unnecessary casts clutter the code and may hide real issues.
+    - Integer literals in C/C++ have well-defined promotion rules — trust the compiler.
+
+    RULE 7 — PRESERVE ORIGINAL INDENTATION AND STYLE:
+    - Match the indentation style (tabs vs spaces, indent width) of the original code exactly.
+    - DO NOT reformat code that is unrelated to the fix.
+    - If the original uses tabs, use tabs. If it uses 4-space indent, use 4-space indent.
+    ============================================================================
+    """
+
+    def _construct_refactor_prompt(self, filename: str, content: str, issues: List[Dict],
                                  preceding_context: str, dependency_context: str,
                                  language: str, constraints_context: str = "") -> str:
         """Construct a detailed refactoring prompt for the LLM.
@@ -753,20 +879,28 @@ class CodebaseFixerAgent:
             ========================================
             """
 
+        integrity_rules = self._construct_code_integrity_rules()
+
         return f"""
             You are a Secure {language} Refactoring Agent.
-            
-            INSTRUCTIONS:
+
+            {integrity_rules}
+
+            GENERAL INSTRUCTIONS:
             1. Analyze the issue, dependencies, and user provided constraints.
             2. Do a thorough analysis and provide the OPTIMUM solution based on best industry standards.
             3. DO NOT introduce any other issues. Double check to make sure of this.
             4. DO NOT change the logic flow unrelated to the fix.
             5. **CRITICAL:** MAINTAIN code layout where possible. Do not shift code unnecessarily, as this fragment is part of a larger file.
             6. Verify your fix against the "EXTERNAL DEFINITIONS" provided above (e.g., check struct member names).
-            7. cross check with the orignial chunk provided to make sure integrity of the file is maintained.
+            7. Cross check with the original chunk provided to make sure integrity of the file is maintained.
             8. **CRITICAL** Return the code as raw text only. Do not use markdown code blocks, backticks, or language identifiers.
             9. **CRITICAL** Output the code directly. Do not wrap it in ``` or C/C++ tags.
-            
+            10. Preserve ALL blank lines from the original code. If the original has a blank line, your output MUST too.
+            11. DO NOT add extra arguments to function calls unless you also update the function definition.
+            12. DO NOT remove type declarations from for-loop initializers (e.g., keep 'int' in 'for (int i = 0; ...)').
+            13. DO NOT use macros (A_ARRAY_SIZE, ARRAY_SIZE, A_COMPILE_TIME_ASSERT, etc.) unless visible in the code or context.
+
             Fix the reported issues in the "CODE FRAGMENT TO FIX" below.
 
             {prompt_constraints_section}
@@ -786,6 +920,8 @@ class CodebaseFixerAgent:
             2. DO NOT use placeholder comments like "// ... existing code ...". Return the full code.
             3. Verify your fix against the "EXTERNAL DEFINITIONS" provided above (e.g., check struct member names).
             4. If you return truncated code, the system will REJECT your fix.
+            5. Preserve ALL blank lines and formatting from the original. Do NOT merge lines by removing newlines.
+            6. Verify argument counts in all function calls match their definitions.
             """
 
     def _load_directives(self) -> List[Dict]:
@@ -814,23 +950,260 @@ class CodebaseFixerAgent:
                 grouped.setdefault(t['file_path'], []).append(t)
         return grouped
 
+    def _smart_strip_code(self, text: str) -> str:
+        """
+        Remove excessive leading/trailing whitespace while preserving internal structure.
+
+        Unlike .strip(), this method:
+        - Strips only leading/trailing blank lines (up to 3 each)
+        - Preserves ALL internal blank lines (critical for code structure around '}')
+        - Does NOT destroy newlines between statements
+        - Removes LLM preamble/postamble text artifacts
+        """
+        if not text:
+            return text
+
+        lines = text.split('\n')
+
+        # Remove leading blank lines (max 3)
+        start_idx = 0
+        for idx in range(min(len(lines), 3)):
+            if lines[idx].strip():
+                break
+            start_idx = idx + 1
+
+        # Remove trailing blank lines (max 3)
+        end_idx = len(lines)
+        for idx in range(len(lines) - 1, max(len(lines) - 4, -1), -1):
+            if lines[idx].strip():
+                end_idx = idx + 1
+                break
+            end_idx = idx
+
+        # Extract the preserved middle section
+        result_lines = lines[start_idx:end_idx]
+
+        # If we stripped everything, return original (safety)
+        if not result_lines:
+            return text
+
+        return '\n'.join(result_lines)
+
     def _extract_code_from_response(self, response: str) -> Optional[str]:
-        """Extract code from LLM response (handles markdown code blocks and plain code)."""
+        """Extract code from LLM response (handles markdown code blocks and plain code).
+
+        Uses _smart_strip_code() instead of .strip() to preserve internal blank
+        lines and code structure while removing only LLM preamble/postamble.
+        """
         match = re.search(r"```(?:\w+)?\n(.*?)```", response, re.DOTALL)
         if match:
-            return match.group(1).strip()
+            return self._smart_strip_code(match.group(1))
         if any(kw in response for kw in ["#include", "namespace", "class", "void ", "int ", "def ", "import "]):
-            return response.strip()
+            return self._smart_strip_code(response)
         return None
 
     def _validate_integrity(self, original: str, new: str) -> bool:
         """
         Validate that the new content is substantially similar to original.
-        [FIX] Integrity check raised to 80%
+
+        Uses multiple validation layers:
+        1. Basic non-empty check
+        2. Size check (new content must be >= 80% of original)
+
+        Additional structural validation is done per-chunk in
+        _validate_code_structure() and _validate_fix_diff() before
+        the fix is accepted.
         """
-        if not new.strip(): 
+        if not new.strip():
             return False
+        # Size check: new content must be at least 80% of original
         return len(new) >= len(original) * 0.8
+
+    # ------------------------------------------------------------------
+    # Post-Fix Structural Validation (compilation safety net)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _count_braces_outside_strings(text: str) -> Tuple[int, int]:
+        """Count { and } braces, ignoring those inside strings, char literals,
+        single-line comments (//), and multi-line comments (/* */).
+
+        Returns (open_count, close_count).
+        """
+        open_count = 0
+        close_count = 0
+        in_string = False
+        in_char = False
+        in_line_comment = False
+        in_block_comment = False
+        i = 0
+        length = len(text)
+
+        while i < length:
+            ch = text[i]
+            prev_ch = text[i - 1] if i > 0 else ''
+
+            # --- Block comment transitions ---
+            if in_block_comment:
+                if ch == '/' and prev_ch == '*':
+                    in_block_comment = False
+                i += 1
+                continue
+            # --- Line comment transitions ---
+            if in_line_comment:
+                if ch == '\n':
+                    in_line_comment = False
+                i += 1
+                continue
+            # --- String transitions ---
+            if in_string:
+                if ch == '"' and prev_ch != '\\':
+                    in_string = False
+                i += 1
+                continue
+            # --- Char literal transitions ---
+            if in_char:
+                if ch == "'" and prev_ch != '\\':
+                    in_char = False
+                i += 1
+                continue
+
+            # --- Detect comment/string starts ---
+            if ch == '/' and i + 1 < length:
+                next_ch = text[i + 1]
+                if next_ch == '/':
+                    in_line_comment = True
+                    i += 2
+                    continue
+                if next_ch == '*':
+                    in_block_comment = True
+                    i += 2
+                    continue
+            if ch == '"':
+                in_string = True
+                i += 1
+                continue
+            if ch == "'":
+                in_char = True
+                i += 1
+                continue
+
+            # --- Count braces ---
+            if ch == '{':
+                open_count += 1
+            elif ch == '}':
+                close_count += 1
+
+            i += 1
+
+        return open_count, close_count
+
+    def _validate_code_structure(self, original: str, fixed: str) -> Tuple[bool, str]:
+        """
+        Validate structural integrity of LLM-generated fix BEFORE accepting it.
+
+        Returns (is_valid, message).
+
+        Hard failures (is_valid=False) cause the fix to be rejected and the
+        original chunk is preserved.  Soft warnings are logged but the fix
+        is still accepted.
+
+        Checks:
+          1. Brace balance: {/} counts must match each other and original.
+          2. Blank line preservation: >20% reduction is a warning.
+          3. For-loop type declarations: count must not decrease.
+          4. Merged lines: '}\\n' count must not decrease >10%.
+        """
+        warnings: List[str] = []
+
+        # --- CHECK 1: BRACE BALANCE (hard failure) ---
+        orig_open, orig_close = self._count_braces_outside_strings(original)
+        fixed_open, fixed_close = self._count_braces_outside_strings(fixed)
+
+        if fixed_open != fixed_close:
+            return False, (
+                f"Brace mismatch in fixed code: {fixed_open} '{{' vs "
+                f"{fixed_close} '}}'. Reverting to original."
+            )
+
+        if orig_open == orig_close and fixed_open != orig_open:
+            return False, (
+                f"Brace count changed: original had {orig_open} pairs, "
+                f"fixed has {fixed_open}. Reverting to original."
+            )
+
+        # --- CHECK 2: BLANK LINE PRESERVATION (soft warning) ---
+        orig_blank = original.count('\n\n')
+        fixed_blank = fixed.count('\n\n')
+        if orig_blank > 2 and fixed_blank < orig_blank * 0.8:
+            warnings.append(
+                f"Blank lines reduced from {orig_blank} to {fixed_blank} "
+                f"(>{20}% loss — possible line merging around braces)."
+            )
+
+        # --- CHECK 3: FOR-LOOP TYPE DECLARATIONS (soft warning) ---
+        # Matches patterns like:  for (int i =   or  for (size_t idx =
+        for_typed_pat = re.compile(r'\bfor\s*\(\s*(?:unsigned\s+|signed\s+|const\s+)*\w+\s+\w+\s*[=;]')
+        orig_typed_for = len(for_typed_pat.findall(original))
+        fixed_typed_for = len(for_typed_pat.findall(fixed))
+        if orig_typed_for > 0 and fixed_typed_for < orig_typed_for:
+            warnings.append(
+                f"For-loop type declarations reduced from {orig_typed_for} to "
+                f"{fixed_typed_for}. Check if variable types were removed."
+            )
+
+        # --- CHECK 4: MERGED LINES around closing braces (soft warning) ---
+        orig_brace_nl = original.count('}\n')
+        fixed_brace_nl = fixed.count('}\n')
+        if orig_brace_nl > 2 and fixed_brace_nl < orig_brace_nl * 0.9:
+            warnings.append(
+                f"Closing-brace newlines reduced from {orig_brace_nl} to "
+                f"{fixed_brace_nl}. Lines may have been merged around '}}'."
+            )
+
+        return True, " | ".join(warnings) if warnings else ""
+
+    def _validate_fix_diff(self, original: str, fixed: str, filename: str) -> str:
+        """
+        Compare original and fixed code for semantic consistency.
+
+        Returns a warning string (empty string if no issues).
+        This check is advisory only — it never rejects a fix.
+
+        Checks:
+          1. New macros introduced that weren't in the original.
+          2. For-loop type removal (additional heuristic).
+        """
+        warnings: List[str] = []
+
+        # --- CHECK 1: Suspicious new macros ---
+        suspicious_macro_pat = re.compile(
+            r'\b(A_ARRAY_SIZE|ARRAY_SIZE|A_COMPILE_TIME_ASSERT|'
+            r'QDF_COMPILE_TIME_ASSERT|A_ASSERT|QDF_ASSERT)\b'
+        )
+        orig_macros = set(suspicious_macro_pat.findall(original))
+        fixed_macros = set(suspicious_macro_pat.findall(fixed))
+        new_macros = fixed_macros - orig_macros
+        if new_macros:
+            for macro in sorted(new_macros):
+                warnings.append(
+                    f"Macro '{macro}' introduced but not in original chunk. "
+                    f"Verify it is defined and has correct argument count."
+                )
+
+        # --- CHECK 2: Type-cast style for-loops introduced ---
+        # Detect: for (var = (CAST)val  — i.e., no type before variable
+        cast_for_pat = re.compile(r'\bfor\s*\(\s*\w+\s*=\s*\(')
+        orig_cast_for = len(cast_for_pat.findall(original))
+        fixed_cast_for = len(cast_for_pat.findall(fixed))
+        if fixed_cast_for > orig_cast_for:
+            warnings.append(
+                f"New cast-style for-loop initializers detected "
+                f"({orig_cast_for} -> {fixed_cast_for}). "
+                f"Check if type declarations were incorrectly removed."
+            )
+
+        return " | ".join(warnings) if warnings else ""
 
     def _atomic_write(self, file_path: Path, content: str):
         """

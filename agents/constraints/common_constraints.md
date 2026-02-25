@@ -102,3 +102,37 @@
 
 ### D. General Code Integrity
 *   **Dependencies**: **DO NOT** import new external libraries (e.g., Boost, Abseil) to solve syntax issues. Use only the Standard Template Library (STL) or existing project utilities.
+
+### E. Code Integrity Rules (LLM Fix Generation — Compilation Safety)
+*These rules prevent the most common compilation-breaking errors in LLM-generated fixes.*
+
+*   **E.1 — Blank Line Preservation**:
+    - Blank lines around closing braces `}` are **CRITICAL** for compilation and readability.
+    - If the original code has `}\n\nvoid foo()`, the fixed code **MUST** maintain this spacing.
+    - **DO NOT** merge lines by removing newlines between functions, blocks, or after closing braces.
+    - Merging `}` with the next statement on the same line causes parsing/syntax errors.
+
+*   **E.2 — Function Signature Consistency**:
+    - When modifying a function CALL (e.g., adding an argument), the function DEFINITION **MUST** also be updated.
+    - Argument counts in calls **MUST** match argument counts in definitions.
+    - **DO NOT** add extra parameters to function calls without changing the corresponding definition.
+    - If the function definition is not visible in the current chunk, **DO NOT** change the call arguments.
+
+*   **E.3 — Variable Type Declaration Preservation**:
+    - For-loop variable declarations **MUST** retain their type: `for (int i = 0; i < N; i++)`
+    - **DO NOT** transform `for (int i = 1; i < X; i++)` to `for (i = (A_UINT32)1; i < X; i++)`
+    - Removing the type declaration from a for-loop initializer causes "undeclared identifier" errors.
+    - **DO NOT** add unnecessary type casts to integer literals — rely on C/C++ implicit promotion.
+
+*   **E.4 — Macro Availability Constraints**:
+    - Use only macros that are **defined** in the current file or explicitly included headers.
+    - For array sizing, **prefer** the standard C/C++ idiom: `sizeof(arr) / sizeof(arr[0])`
+    - **DO NOT** use `A_ARRAY_SIZE(arr)` or `ARRAY_SIZE(arr)` unless visible in the code or context.
+    - Application-specific macros (A_\*, QDF_\*, OL_\*) may not be visible in this translation unit.
+
+*   **E.5 — Macro Argument Count Validation**:
+    - `A_COMPILE_TIME_ASSERT` requires exactly **2 arguments**: `A_COMPILE_TIME_ASSERT(condition, message_string)`
+    - **WRONG**: `A_COMPILE_TIME_ASSERT(sizeof(x) == 4)` — missing second argument.
+    - **CORRECT**: `A_COMPILE_TIME_ASSERT(sizeof(x) == 4, "size check failed")`
+    - When in doubt, use standard C++11 `static_assert(condition, "message")` instead.
+    - Before using ANY assertion macro, verify its expected argument count from visible definitions.

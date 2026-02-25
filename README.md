@@ -123,7 +123,7 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 ├── db/
 │   ├── postgres_db_setup.py            # PostgreSQL schema setup (vector + telemetry + HITL)
 │   ├── postgres_api.py                 # PostgreSQL API helpers
-│   ├── telemetry_service.py            # Silent telemetry collector (TelemetryService)
+│   ├── telemetry_service.py            # Telemetry pipeline (per-finding, per-LLM-call, cost, constraints)
 │   ├── schema_telemetry.sql            # SQL schema for telemetry & HITL tables
 │   ├── json_flattner.py                # JSON → flat JSON converter
 │   ├── ndjson_processor.py             # NDJSON processor for embeddings
@@ -186,13 +186,20 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 
 
 
-**Install PostgreSQL and initialize the database** (required for vector DB pipeline):
+**Install PostgreSQL and initialize the database** (required for vector DB pipeline, telemetry, and HITL):
 
-**macOS / Linux (Option A — automated bootstrap):**
+#### Option A — Local Database (automated bootstrap)
+
+**macOS / Linux:**
 ```bash
 sudo ./bootstrap_db.sh
 ```
 The script auto-detects the installed PostgreSQL version, installs pgvector (building from source if the Homebrew bottle doesn't match your PG version), creates the user, database, extension, and permissions.
+
+**Windows (PowerShell — run as Administrator):**
+```powershell
+.\bootstrap_db.ps1
+```
 
 **macOS (Option B — manual Homebrew setup):**
 ```bash
@@ -212,21 +219,73 @@ cd pgvector && PG_CONFIG=/opt/homebrew/opt/postgresql@16/bin/pg_config make && s
 /opt/homebrew/opt/postgresql@16/bin/psql -d codebase_analytics_db -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ```
 
-**Windows (PowerShell — run as Administrator):**
+#### Option B — Remote Database Server
+
+Both bootstrap scripts support connecting to a remote PostgreSQL server for centralized telemetry, run history, and team-wide analytics. When a remote host is detected, the scripts skip local PostgreSQL installation and connect directly.
+
+**macOS / Linux:**
+```bash
+DB_HOST=db.example.com DB_PORT=5432 \
+  DB_ADMIN_USER=admin DB_ADMIN_PASSWORD=secretpass \
+  DB_USER=codebase_analytics_user DB_PASSWORD=postgres \
+  DB_NAME=codebase_analytics_db \
+  DB_SSL_MODE=require \
+  sudo -E ./bootstrap_db.sh
+```
+
+**Windows PowerShell:**
 ```powershell
+$env:DB_HOST="db.example.com"
+$env:DB_PORT="5432"
+$env:DB_ADMIN_USER="admin"
+$env:DB_ADMIN_PASSWORD="secretpass"
+$env:DB_SSL_MODE="require"
 .\bootstrap_db.ps1
 ```
 
-All options install PostgreSQL with pgvector, create the application user and database, enable the vector extension, and grant all required permissions. Defaults match `global_config.yaml`. Override with environment variables if needed:
+The bootstrap script performs a pre-flight connectivity check (`pg_isready`) before proceeding. For SSL modes `verify-ca` or `verify-full`, supply `DB_SSL_CA`, `DB_SSL_CERT`, and `DB_SSL_KEY` pointing to your certificate files.
 
-## Optional
+#### Environment Variable Overrides
+
+All options install PostgreSQL with pgvector (local) or connect to existing PostgreSQL (remote), create the application user and database, enable the vector extension, and grant all required permissions. Defaults match `global_config.yaml`. Override with environment variables:
+
+| Variable | Default | Description |
+|:---------|:--------|:------------|
+| `DB_HOST` | `localhost` | PostgreSQL host (remote host skips local install) |
+| `DB_PORT` | `5432` | PostgreSQL port |
+| `DB_NAME` | `codebase_analytics_db` | Database name |
+| `DB_USER` | `codebase_analytics_user` | Application user |
+| `DB_PASSWORD` | `postgres` | Application user password |
+| `DB_ADMIN_USER` | *(auto)* | Admin user for remote DB setup |
+| `DB_ADMIN_PASSWORD` | *(none)* | Admin password for remote DB setup |
+| `DB_SSL_MODE` | `prefer` | SSL mode: `disable`, `prefer`, `require`, `verify-ca`, `verify-full` |
+| `DB_SSL_CA` | *(none)* | Path to CA certificate file |
+| `DB_SSL_CERT` | *(none)* | Path to client certificate file |
+| `DB_SSL_KEY` | *(none)* | Path to client private key file |
+
 ```bash
-# macOS / Linux
+# Quick local override example
 DB_USER=myuser DB_PASSWORD=mypass DB_NAME=mydb sudo -E ./bootstrap_db.sh
-
-# Windows PowerShell
-$env:DB_USER="myuser"; $env:DB_PASSWORD="mypass"; $env:DB_NAME="mydb"; .\bootstrap_db.ps1
 ```
+
+#### Connection Pool & SSL Configuration
+
+For production deployments, tune connection pooling and SSL in `global_config.yaml`:
+
+```yaml
+database:
+  pool_size: 5              # Persistent connections in the pool
+  pool_recycle: 3600        # Seconds before recycling a connection
+  pool_timeout: 30          # Seconds to wait for a pool connection
+  pool_pre_ping: true       # Verify connections before use (recommended)
+
+  ssl_mode: prefer          # disable | prefer | require | verify-ca | verify-full
+  ssl_ca: ""                # Path to CA certificate
+  ssl_cert: ""              # Path to client certificate
+  ssl_key: ""               # Path to client private key
+```
+
+These settings apply to both TelemetryService and all database operations. For remote servers, `ssl_mode: require` or higher is recommended.
 
 ### 2. Python Environment Setup
 
@@ -560,7 +619,7 @@ The `global_config.yaml` file provides hierarchical, typed configuration with `$
 | `paths`              | Input/output directories, prompt file paths           |
 | `llm`                | Provider, model, API keys, token limits, temperature  |
 | `embeddings`         | Vector embedding model selection                      |
-| `database`           | PostgreSQL connection, PGVector collection settings   |
+| `database`           | PostgreSQL connection, PGVector collection, pool tuning, SSL/TLS |
 | `email`              | SMTP report delivery configuration                    |
 | `scanning`           | File discovery exclusions — directory names and glob patterns to skip |
 | `dependency_builder` | CCLS executable, timeouts, BFS depth, connection pool |
@@ -568,21 +627,43 @@ The `global_config.yaml` file provides hierarchical, typed configuration with `$
 | `mermaid`            | Diagram rendering configuration                       |
 | `hitl`               | HITL RAG pipeline — feedback store, constraint parsing |
 | `context`            | Header context injection — include paths, depth, token budget |
-| `telemetry`          | Silent usage telemetry (enable/disable)               |
+| `telemetry`          | Telemetry pipeline — enable/disable, cost tracking, usage reports |
 | `logging`            | Log level, verbose/debug flags                        |
 
 ---
 
 ## Telemetry & Analytics
 
-CURE includes a silent, fire-and-forget telemetry system that records framework usage patterns into the same PostgreSQL database (`codebase_analytics_db`). Telemetry is enabled by default and can be toggled in `global_config.yaml` or the Streamlit sidebar.
+CURE includes a comprehensive, fire-and-forget telemetry pipeline that records granular framework usage patterns into PostgreSQL (`codebase_analytics_db`). Every public logging method swallows exceptions silently so telemetry never disrupts the analysis pipeline. Telemetry is enabled by default and can be toggled in `global_config.yaml` or the Streamlit sidebar.
 
-### What is tracked
+### What Is Tracked
 
-- **Run summaries**: mode (analysis/fixer/patch), status, duration, file count, issue counts by severity
-- **Fix outcomes**: issues fixed, skipped, and failed per fixer run
-- **LLM usage**: provider, model, token counts (prompt + completion), latency per call
-- **Granular events**: individual issue found/fixed/skipped events, phase transitions, export actions
+| Category | Details |
+|:---------|:--------|
+| **Run summaries** | Mode (analysis/fixer/patch), status, duration, file count, issue counts by severity |
+| **Per-finding detail** | File path, line range, title, category, severity, confidence, description, suggestion, code snippet, fixed code, false-positive flag, user feedback, and arbitrary JSONB metadata |
+| **Per-LLM-call detail** | Provider, model, purpose (analysis/fix/patch_review), file path, chunk index, prompt tokens, completion tokens, total tokens, latency in milliseconds, estimated cost in USD, status, and error messages |
+| **Constraint effectiveness** | Which constraint file/rule was applied, which file and issue type it affected, and the action taken (modified prompt or suppressed finding) |
+| **Static analysis results** | Per-adapter results (complexity, security, dead code, call graph, function metrics) with file counts and JSONB details per run |
+| **Fix outcomes** | Issues fixed, skipped, and failed per fixer run with per-item audit trail |
+| **HITL decisions** | Constraint hits from human-in-the-loop feedback — prompt augmentations and issue suppressions |
+| **Usage reports** | Materialized daily/weekly summaries of runs, files, findings, fixes, tokens, and estimated cost (upsert pattern) |
+
+### LLM Cost Estimation
+
+The telemetry service includes a built-in token pricing table that automatically estimates cost for each LLM call based on the provider and model. The pricing table covers Anthropic Claude (Sonnet, Opus, Haiku), Google Vertex AI (Gemini), and Azure OpenAI (GPT-4.1). Cost is computed as `(prompt_tokens × input_price + completion_tokens × output_price) / 1,000,000` and stored alongside each call record.
+
+Supported models and their pricing (per million tokens):
+
+| Provider | Model | Input | Output |
+|:---------|:------|------:|-------:|
+| Anthropic | claude-sonnet-4 | $3.00 | $15.00 |
+| Anthropic | claude-opus-4 | $15.00 | $75.00 |
+| Anthropic | claude-haiku-4 | $0.25 | $1.25 |
+| Vertex AI | gemini-2.5-pro | $1.25 | $10.00 |
+| Azure | gpt-4.1 | $2.00 | $8.00 |
+
+Unknown models default to a conservative $5.00/$15.00 per million tokens. The pricing table is easily extensible in `db/telemetry_service.py`.
 
 ### Configuration
 
@@ -590,20 +671,115 @@ CURE includes a silent, fire-and-forget telemetry system that records framework 
 # global_config.yaml
 telemetry:
   enable: true   # set to false to disable all telemetry
+
+database:
+  pool_size: 5              # Persistent connections in the pool
+  pool_recycle: 3600        # Seconds before recycling a connection
+  pool_timeout: 30          # Seconds to wait for a pool connection
+  pool_pre_ping: true       # Verify connections before use
+  ssl_mode: prefer          # disable | prefer | require | verify-ca | verify-full
+  ssl_ca: ""                # Path to CA certificate
+  ssl_cert: ""              # Path to client certificate
+  ssl_key: ""               # Path to client private key
 ```
 
-### Database tables
+Pool configuration is passed to SQLAlchemy's `create_engine()` and applies to all telemetry database operations. For remote PostgreSQL servers, set `ssl_mode: require` or higher.
 
-| Table                | Purpose                                           |
-| :------------------- | :------------------------------------------------ |
-| `telemetry_runs`     | One row per analysis/fixer/patch run              |
-| `telemetry_events`   | Granular events within a run (issues, LLM calls)  |
+### Database Tables
 
-Tables are auto-created by `PostgresDbSetup` during database initialization, or can be manually applied via `db/schema_telemetry.sql`.
+| Table | Purpose |
+|:------|:--------|
+| `telemetry_runs` | One row per analysis/fixer/patch run — mode, status, duration, file counts, severity breakdown |
+| `telemetry_events` | Legacy granular events within a run (issues, LLM calls) — retained for backward compatibility |
+| `telemetry_findings` | Per-finding detail — file, lines, title, category, severity, confidence, code snippets, fix status, false-positive flag, user feedback, JSONB metadata |
+| `telemetry_llm_calls` | Per-LLM-call detail — provider, model, purpose, tokens, latency, estimated cost, status |
+| `telemetry_constraint_hits` | Constraint rule applications — source file, rule name, target file, issue type, action (modified/suppressed) |
+| `telemetry_static_analysis` | Per-adapter static analysis results — adapter name, files analyzed, issues found, JSONB details |
+| `telemetry_usage_reports` | Materialized daily/weekly usage summaries with unique constraint on (report_date, report_type) for upsert |
+
+All tables use `run_id` foreign keys back to `telemetry_runs`. Tables are auto-created by `PostgresDbSetup` during database initialization and by `TelemetryService._init_schema()` on first connection. The full schema can also be applied manually via `db/schema_telemetry.sql`.
+
+### Agent Telemetry Integration
+
+All three agents (`CodebaseLLMAgent`, `CodebaseFixerAgent`, `CodebasePatchAgent`) are instrumented with per-call LLM telemetry. Each `llm_tools.llm_call()` invocation is timed and logged with token counts extracted from the response object. The background workers in `ui/background_workers.py` additionally log per-finding detail, per-adapter static analysis results, and severity breakdowns at the end of each run.
+
+Constraint tracking is wired into both the LLM agent and patch agent at three points: when HITL feedback suppresses a file (`should_skip_issue`), when HITL augments a prompt (`augment_prompt`), and when constraint files inject identification rules into the prompt. Each event is logged to `telemetry_constraint_hits` with the constraint source (file names or `hitl_feedback`), rule type, target file, and action taken.
 
 ### Dashboard
 
-The **Telemetry** tab in the Streamlit UI displays: total runs, issues found/fixed, fix success rate, runs over time, issues by severity, top issue types, LLM usage by model, and a drill-down into individual run events.
+The **Telemetry** tab in the Streamlit UI provides a 5-tab analytics dashboard:
+
+| Tab | Contents |
+|:----|:---------|
+| **📊 Overview** | Top-level metrics (runs, issues, fixes, fix rate, estimated 30-day cost), runs-over-time bar chart, daily cost trend line chart, issues by severity, top issue types, LLM usage summary, and a recent runs table with drill-down into individual run events |
+| **🔍 Detailed Findings** | Filterable findings explorer with run, severity, and category filters. Shows false-positive rate (30-day), confirmed vs. flagged counts, per-finding detail table, and CSV export button |
+| **🤖 LLM Analytics** | Cost breakdown by provider/model (bar chart + table), token efficiency by model, and per-run LLM call detail with latency distribution histogram. Per-run summary shows total calls, tokens, and cost |
+| **🛡️ Constraints & Quality** | Constraint hit summary by rule (table), actions breakdown (bar chart), agent comparison (30-day), and false-positive rate detail (JSON view) |
+| **📋 Usage Reports** | Daily/weekly materialized report viewer with generate button, tabular display of runs/files/findings/fixes/tokens/cost, and CSV export |
+
+### TelemetryService API
+
+The `TelemetryService` class (`db/telemetry_service.py`) exposes both logging and query methods:
+
+**Logging methods** (fire-and-forget, all swallow exceptions):
+
+| Method | Purpose |
+|:-------|:--------|
+| `start_run()` | Create a new telemetry run record, returns `run_id` |
+| `finish_run()` | Update run with final status, counts, duration, severity breakdown |
+| `log_event()` | Legacy event logging (backward compatible) |
+| `log_finding()` | Log a single finding with full detail (file, lines, severity, code, fix status) |
+| `log_llm_call_detailed()` | Log a single LLM call with tokens, latency, and auto-computed cost |
+| `log_constraint_hit()` | Log a constraint rule application (source, rule, file, action) |
+| `log_static_analysis()` | Log adapter results (adapter name, files, issues, JSONB details) |
+| `generate_usage_report()` | Materialize a daily/weekly usage summary (upsert) |
+
+**Query methods** (for dashboard):
+
+| Method | Returns |
+|:-------|:--------|
+| `get_summary_stats()` | Aggregate metrics, runs by date, severity distribution, top issue types |
+| `get_cost_summary(days)` | Total cost, daily trend, and per-model cost breakdown |
+| `get_findings_detail(run_id)` | All findings for a run (or all runs if `None`) |
+| `get_constraint_effectiveness(run_id)` | Constraint hits grouped by rule and by action |
+| `get_false_positive_rate(days)` | Total findings, false positives, confirmed, and rate |
+| `get_agent_comparison(days)` | Per-agent run counts, issue counts, fix rates, avg duration |
+| `get_usage_reports(report_type, limit)` | Materialized usage report records |
+| `get_recent_runs(limit)` | Most recent run records |
+| `get_run_events(run_id)` | Legacy events for a specific run |
+
+### Querying Telemetry Directly
+
+```sql
+-- Cost summary by model (last 30 days)
+SELECT model, COUNT(*) as calls,
+       SUM(total_tokens) as tokens,
+       SUM(estimated_cost_usd) as cost
+FROM telemetry_llm_calls
+WHERE created_at > NOW() - INTERVAL '30 days'
+GROUP BY model ORDER BY cost DESC;
+
+-- False positive rate
+SELECT COUNT(*) as total,
+       SUM(CASE WHEN is_false_positive THEN 1 ELSE 0 END) as false_positives,
+       ROUND(100.0 * SUM(CASE WHEN is_false_positive THEN 1 ELSE 0 END) / COUNT(*), 1) as fp_rate
+FROM telemetry_findings
+WHERE created_at > NOW() - INTERVAL '30 days';
+
+-- Constraint effectiveness
+SELECT constraint_source, constraint_rule, action, COUNT(*)
+FROM telemetry_constraint_hits
+GROUP BY constraint_source, constraint_rule, action
+ORDER BY count DESC;
+
+-- Recent runs with cost
+SELECT r.run_id, r.mode, r.status, r.issues_total, r.duration_seconds,
+       COALESCE(SUM(l.estimated_cost_usd), 0) as run_cost
+FROM telemetry_runs r
+LEFT JOIN telemetry_llm_calls l ON l.run_id = r.run_id
+GROUP BY r.run_id, r.mode, r.status, r.issues_total, r.duration_seconds
+ORDER BY r.created_at DESC LIMIT 10;
+```
 
 ---
 
@@ -648,13 +824,31 @@ psql -h localhost -U codebase_analytics_user -d codebase_analytics_db
 -- Check embeddings
 SELECT document, cmetadata FROM langchain_pg_embedding LIMIT 5;
 
--- Check telemetry runs
-SELECT run_id, mode, status, issues_total, issues_fixed, duration_seconds
-FROM telemetry_runs ORDER BY created_at DESC LIMIT 10;
+-- Check telemetry runs with cost
+SELECT r.run_id, r.mode, r.status, r.issues_total, r.duration_seconds,
+       COALESCE(SUM(l.estimated_cost_usd), 0) as run_cost
+FROM telemetry_runs r
+LEFT JOIN telemetry_llm_calls l ON l.run_id = r.run_id
+GROUP BY r.run_id, r.mode, r.status, r.issues_total, r.duration_seconds
+ORDER BY r.created_at DESC LIMIT 10;
+
+-- Check findings by severity
+SELECT severity, COUNT(*) FROM telemetry_findings
+GROUP BY severity ORDER BY count DESC;
+
+-- Check LLM cost by model
+SELECT model, COUNT(*) as calls, SUM(total_tokens) as tokens,
+       SUM(estimated_cost_usd) as cost
+FROM telemetry_llm_calls GROUP BY model ORDER BY cost DESC;
 
 -- Check HITL feedback history
 SELECT issue_type, human_action, COUNT(*) FROM hitl_feedback_decisions
 GROUP BY issue_type, human_action ORDER BY count DESC;
+
+-- Check constraint effectiveness
+SELECT constraint_source, action, COUNT(*)
+FROM telemetry_constraint_hits
+GROUP BY constraint_source, action ORDER BY count DESC;
 
 -- Clear all vector data
 DELETE FROM langchain_pg_embedding;

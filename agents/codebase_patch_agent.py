@@ -209,6 +209,8 @@ class CodebasePatchAgent:
         exclude_globs: Optional[List[str]] = None,
         custom_constraints: Optional[List[str]] = None,
         codebase_path: Optional[str] = None,
+        telemetry=None,
+        telemetry_run_id: Optional[str] = None,
     ) -> None:
         self.file_path = Path(file_path).resolve()
         self.patch_file = Path(patch_file).resolve()
@@ -222,6 +224,10 @@ class CodebasePatchAgent:
         self.exclude_dirs = exclude_dirs or []
         self.exclude_globs = exclude_globs or []
         self.custom_constraints = custom_constraints or []
+
+        # Telemetry (optional — fire-and-forget)
+        self._telemetry = telemetry
+        self._telemetry_run_id = telemetry_run_id
 
         # Context codebase path — the REAL codebase root used by the inner
         # CodebaseLLMAgent for header resolution, context validation, and
@@ -1204,6 +1210,19 @@ class CodebasePatchAgent:
                 {constraints_context}
                 ========================================
                 """
+                # Log constraint application via telemetry
+                if self._telemetry and self._telemetry_run_id:
+                    try:
+                        self._telemetry.log_constraint_hit(
+                            run_id=self._telemetry_run_id,
+                            constraint_source=getattr(self, '_constraint_files_used', 'constraints'),
+                            constraint_rule="identification_rules",
+                            file_path=filename,
+                            issue_type="code_quality",
+                            action="modified",
+                        )
+                    except Exception:
+                        pass
 
             # --- Patch line ranges block ---
             # Use EXACT hunk ranges (no padding) so the LLM knows precisely
@@ -1253,6 +1272,19 @@ class CodebasePatchAgent:
                         file_path=filename,
                         agent_type="patch_agent",
                     )
+                    # Log HITL prompt augmentation as constraint hit
+                    if self._telemetry and self._telemetry_run_id:
+                        try:
+                            self._telemetry.log_constraint_hit(
+                                run_id=self._telemetry_run_id,
+                                constraint_source="hitl_feedback",
+                                constraint_rule="prompt_augmentation",
+                                file_path=filename,
+                                issue_type="code_quality",
+                                action="hitl_suppressed",
+                            )
+                        except Exception:
+                            pass
                 except Exception as hitl_err:
                     self.logger.debug(f"  HITL augment failed: {hitl_err}")
 
@@ -1275,7 +1307,36 @@ class CodebasePatchAgent:
 
             # --- LLM call ---
             try:
+                _llm_t0 = time.time()
                 response = self.llm_tools.llm_call(final_prompt)
+                _llm_ms = int((time.time() - _llm_t0) * 1000)
+
+                # Telemetry: per-call LLM logging
+                if self._telemetry and self._telemetry_run_id:
+                    try:
+                        _usage = getattr(response, "usage", None) or {}
+                        if isinstance(_usage, dict):
+                            _pt = _usage.get("input_tokens") or _usage.get("prompt_tokens") or 0
+                            _ct = _usage.get("output_tokens") or _usage.get("completion_tokens") or 0
+                        else:
+                            _pt = getattr(_usage, "input_tokens", 0) or 0
+                            _ct = getattr(_usage, "output_tokens", 0) or 0
+                        _provider = getattr(self.llm_tools, "provider", "")
+                        _model = getattr(self.llm_tools, "model", "")
+                        self._telemetry.log_llm_call_detailed(
+                            run_id=self._telemetry_run_id,
+                            provider=_provider,
+                            model=_model,
+                            purpose="patch_review",
+                            file_path=filename,
+                            chunk_index=rng_idx,
+                            prompt_tokens=int(_pt),
+                            completion_tokens=int(_ct),
+                            latency_ms=_llm_ms,
+                        )
+                    except Exception:
+                        pass  # never fail on telemetry
+
             except Exception as llm_err:
                 self.logger.warning(f"LLM call failed for {label} chunk {rng_idx+1}: {llm_err}")
                 continue
@@ -1491,6 +1552,18 @@ class CodebasePatchAgent:
         # ---------------------------------------------------------
         # 3. Return Combined Result
         # ---------------------------------------------------------
+        # Track which constraint sources were loaded for telemetry
+        sources = []
+        if common_file.exists():
+            sources.append("common_constraints.md")
+        if codebase_file.exists():
+            sources.append("codebase_constraints.md")
+        for cp in (self.custom_constraints or []):
+            sources.append(str(Path(cp).name))
+        if specific_file_path and specific_file_path.exists():
+            sources.append(specific_file_path.name)
+        self._constraint_files_used = ", ".join(sources) if sources else "none"
+
         if not combined_constraints:
             return ""
         return "\n".join(combined_constraints)

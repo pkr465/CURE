@@ -125,6 +125,7 @@ _DEFAULTS = {
     "use_ccls": False,
     "exclude_dirs": "",
     "exclude_globs": "",
+    "exclude_headers": "",
     "custom_constraints": "",
     "file_to_fix": None,
     # Pipeline state
@@ -520,6 +521,12 @@ def page_analyze():
                     help="e.g., */test/*, moc_*.cpp, *_autogen/*",
                 )
                 st.session_state["exclude_globs"] = exclude_globs
+                exclude_headers = st.text_input(
+                    "Exclude Headers (comma-separated)",
+                    value="",
+                    help="Header files to exclude from context injection. Supports exact names, basenames, or glob patterns. e.g., auto_generated.h, debug_*.h",
+                )
+                st.session_state["exclude_headers"] = exclude_headers
                 custom_constraints = st.text_input(
                     "Custom Constraint Files (comma-separated .md paths)",
                     value="",
@@ -572,6 +579,11 @@ def page_analyze():
                 "output_dir": st.session_state["output_dir"],
                 "enable_adapters": st.session_state.get("enable_adapters", False),
                 "debug_mode": st.session_state.get("debug_mode", False),
+                "exclude_headers": [
+                    h.strip()
+                    for h in st.session_state.get("exclude_headers", "").split(",")
+                    if h.strip()
+                ],
             }
 
             # Clean previous run artifacts
@@ -618,6 +630,11 @@ def page_analyze():
                 for g in st.session_state.get("exclude_globs", "").split(",")
                 if g.strip()
             ]
+            exclude_headers = [
+                h.strip()
+                for h in st.session_state.get("exclude_headers", "").split(",")
+                if h.strip()
+            ]
             config = {
                 "codebase_path": st.session_state["codebase_path"],
                 "output_dir": st.session_state["output_dir"],
@@ -635,6 +652,7 @@ def page_analyze():
                 "batch_size": st.session_state.get("batch_size", 25),
                 "exclude_dirs": exclude,
                 "exclude_globs": exclude_globs,
+                "exclude_headers": exclude_headers,
                 "custom_constraints": [
                     c.strip()
                     for c in st.session_state.get("custom_constraints", "").split(",")
@@ -2337,7 +2355,7 @@ def page_constraints_generator():
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def page_telemetry():
-    """Telemetry dashboard showing framework usage patterns and statistics."""
+    """Enhanced telemetry dashboard with tabbed layout for deep analytics."""
     st.markdown(
         "<h2 style='text-align:center; margin-top:-10px;'>"
         "📈 Telemetry Dashboard</h2>",
@@ -2352,7 +2370,14 @@ def page_telemetry():
         gc = GlobalConfig()
         conn_str = gc.get("POSTGRES_CONNECTION")
         if conn_str:
-            telemetry = TelemetryService(connection_string=conn_str)
+            db_cfg = gc.get("database", {}) or {}
+            telemetry = TelemetryService(
+                connection_string=conn_str,
+                pool_size=int(db_cfg.get("pool_size", 5)),
+                pool_recycle=int(db_cfg.get("pool_recycle", 3600)),
+                pool_timeout=int(db_cfg.get("pool_timeout", 30)),
+                pool_pre_ping=bool(db_cfg.get("pool_pre_ping", True)),
+            )
     except Exception:
         pass
 
@@ -2363,114 +2388,345 @@ def page_telemetry():
         )
         return
 
-    # ── Summary metrics ──────────────────────────────────────────────────
+    # ── Summary metrics (always visible above tabs) ──────────────────────
     stats = telemetry.get_summary_stats()
     if not stats:
         st.info("No telemetry data recorded yet. Run an analysis to start collecting metrics.")
         return
 
-    st.markdown("### Overview")
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Total Runs", stats.get("total_runs", 0))
     m2.metric("Total Issues Found", stats.get("total_issues", 0))
     m3.metric("Total Issues Fixed", stats.get("total_fixed", 0))
-    m4.metric(
-        "Fix Success Rate",
-        f"{stats.get('fix_success_rate', 0)}%"
-    )
+    m4.metric("Fix Success Rate", f"{stats.get('fix_success_rate', 0)}%")
 
+    # ── Cost summary (top-level) ─────────────────────────────────────────
+    cost_data = telemetry.get_cost_summary(days=30)
+    cost_total = 0.0
+    if cost_data and cost_data.get("total_cost") is not None:
+        cost_total = float(cost_data["total_cost"])
     m5, m6, m7, m8 = st.columns(4)
     m5.metric("Analysis Runs", stats.get("analysis_runs", 0))
     m6.metric("Fixer Runs", stats.get("fixer_runs", 0))
     m7.metric("Patch Runs", stats.get("patch_runs", 0))
-    m8.metric("Avg Duration", f"{stats.get('avg_duration', 0):.1f}s")
+    m8.metric("Est. Cost (30d)", f"${cost_total:,.2f}")
 
     st.markdown("---")
 
-    # ── Runs over time ───────────────────────────────────────────────────
-    runs_by_date = stats.get("runs_by_date", {})
-    if runs_by_date:
-        st.markdown("### Runs Over Time (Last 30 Days)")
-        chart_df = pd.DataFrame(
-            list(runs_by_date.items()),
-            columns=["Date", "Runs"],
+    # ═════════════════════════════════════════════════════════════════════
+    #  Tabbed layout
+    # ═════════════════════════════════════════════════════════════════════
+    tab_overview, tab_findings, tab_llm, tab_constraints, tab_reports = st.tabs([
+        "📊 Overview", "🔍 Detailed Findings", "🤖 LLM Analytics",
+        "🛡️ Constraints & Quality", "📋 Usage Reports",
+    ])
+
+    # ── Tab 1: Overview ─────────────────────────────────────────────────
+    with tab_overview:
+        # Runs over time
+        runs_by_date = stats.get("runs_by_date", {})
+        if runs_by_date:
+            st.markdown("#### Runs Over Time (Last 30 Days)")
+            chart_df = pd.DataFrame(
+                list(runs_by_date.items()), columns=["Date", "Runs"],
+            )
+            chart_df["Date"] = pd.to_datetime(chart_df["Date"])
+            st.bar_chart(chart_df.set_index("Date"))
+
+        # Cost trend
+        if cost_data and cost_data.get("daily_trend"):
+            st.markdown("#### Daily Cost Trend (Last 30 Days)")
+            trend = cost_data["daily_trend"]
+            trend_df = pd.DataFrame(trend)
+            if not trend_df.empty and "date" in trend_df.columns and "cost" in trend_df.columns:
+                trend_df["date"] = pd.to_datetime(trend_df["date"])
+                trend_df = trend_df.rename(columns={"date": "Date", "cost": "Cost ($)"})
+                st.line_chart(trend_df.set_index("Date"))
+
+        # Severity + issue types side by side
+        col_sev, col_types = st.columns(2)
+        with col_sev:
+            issues_by_sev = stats.get("issues_by_severity", {})
+            if issues_by_sev:
+                st.markdown("#### Issues by Severity")
+                sev_df = pd.DataFrame(
+                    list(issues_by_sev.items()), columns=["Severity", "Count"],
+                )
+                st.bar_chart(sev_df.set_index("Severity"))
+        with col_types:
+            top_types = stats.get("top_issue_types", {})
+            if top_types:
+                st.markdown("#### Top Issue Types")
+                types_df = pd.DataFrame(
+                    list(top_types.items()), columns=["Issue Type", "Count"],
+                )
+                st.dataframe(types_df, use_container_width=True, hide_index=True)
+
+        # LLM usage summary
+        st.markdown("#### LLM Usage Summary")
+        llm_col1, llm_col2 = st.columns(2)
+        with llm_col1:
+            st.metric("Total LLM Calls", stats.get("total_llm_calls", 0))
+            st.metric("Total Prompt Tokens", f"{stats.get('total_prompt_tokens', 0):,}")
+        with llm_col2:
+            st.metric("Total Completion Tokens", f"{stats.get('total_completion_tokens', 0):,}")
+            st.metric("Avg Duration", f"{stats.get('avg_duration', 0):.1f}s")
+
+        # Recent runs table
+        st.markdown("#### Recent Runs")
+        recent = telemetry.get_recent_runs(limit=25)
+        if recent:
+            display_cols = [
+                "run_id", "created_at", "mode", "status",
+                "files_analyzed", "issues_total", "issues_fixed",
+                "issues_skipped", "issues_failed", "duration_seconds",
+                "llm_model", "use_ccls",
+            ]
+            runs_df = pd.DataFrame(recent)
+            available = [c for c in display_cols if c in runs_df.columns]
+            st.dataframe(runs_df[available], use_container_width=True, hide_index=True)
+
+            # Drill-down into a run
+            run_ids = [r["run_id"] for r in recent]
+            selected_run = st.selectbox(
+                "View events for run:", ["(select)"] + run_ids, key="overview_run_select",
+            )
+            if selected_run and selected_run != "(select)":
+                events = telemetry.get_run_events(selected_run)
+                if events:
+                    ev_df = pd.DataFrame(events)
+                    ev_cols = [c for c in [
+                        "created_at", "event_type", "file_path",
+                        "issue_type", "severity", "llm_model",
+                        "prompt_tokens", "completion_tokens", "latency_ms",
+                    ] if c in ev_df.columns]
+                    st.dataframe(ev_df[ev_cols], use_container_width=True, hide_index=True)
+                else:
+                    st.info("No events recorded for this run.")
+        else:
+            st.info("No runs recorded yet.")
+
+    # ── Tab 2: Detailed Findings ────────────────────────────────────────
+    with tab_findings:
+        st.markdown("#### Granular Finding Explorer")
+
+        # False positive rate metric
+        fp_data = telemetry.get_false_positive_rate(days=30)
+        fp_rate = 0.0
+        fp_total = 0
+        if fp_data:
+            fp_rate = float(fp_data.get("false_positive_rate", 0))
+            fp_total = int(fp_data.get("total_findings", 0))
+        fp_c1, fp_c2, fp_c3 = st.columns(3)
+        fp_c1.metric("Findings (30d)", fp_total)
+        fp_c2.metric("False Positive Rate", f"{fp_rate:.1f}%")
+        fp_c3.metric("Confirmed Findings", int(fp_data.get("confirmed", 0)) if fp_data else 0)
+
+        # Filter by run
+        recent_for_filter = telemetry.get_recent_runs(limit=50)
+        run_opts = ["All Runs"]
+        if recent_for_filter:
+            run_opts += [r["run_id"] for r in recent_for_filter]
+        filter_run = st.selectbox(
+            "Filter by Run ID:", run_opts, key="findings_run_filter",
         )
-        chart_df["Date"] = pd.to_datetime(chart_df["Date"])
-        st.bar_chart(chart_df.set_index("Date"))
 
-    # ── Issues by severity ───────────────────────────────────────────────
-    col_sev, col_types = st.columns(2)
+        sel_run_id = None if filter_run == "All Runs" else filter_run
+        findings = telemetry.get_findings_detail(run_id=sel_run_id)
 
-    with col_sev:
-        issues_by_sev = stats.get("issues_by_severity", {})
-        if issues_by_sev:
-            st.markdown("### Issues by Severity")
-            sev_df = pd.DataFrame(
-                list(issues_by_sev.items()),
-                columns=["Severity", "Count"],
+        if findings:
+            findings_df = pd.DataFrame(findings)
+            # Severity and category filters
+            f_col1, f_col2 = st.columns(2)
+            with f_col1:
+                if "severity" in findings_df.columns:
+                    sev_opts = ["All"] + sorted(findings_df["severity"].dropna().unique().tolist())
+                    sel_sev = st.selectbox("Filter Severity:", sev_opts, key="findings_sev_filter")
+                    if sel_sev != "All":
+                        findings_df = findings_df[findings_df["severity"] == sel_sev]
+            with f_col2:
+                if "category" in findings_df.columns:
+                    cat_opts = ["All"] + sorted(findings_df["category"].dropna().unique().tolist())
+                    sel_cat = st.selectbox("Filter Category:", cat_opts, key="findings_cat_filter")
+                    if sel_cat != "All":
+                        findings_df = findings_df[findings_df["category"] == sel_cat]
+
+            show_cols = [c for c in [
+                "finding_id", "run_id", "created_at", "file_path",
+                "line_start", "title", "category", "severity",
+                "confidence", "description", "is_false_positive",
+            ] if c in findings_df.columns]
+            st.dataframe(findings_df[show_cols], use_container_width=True, hide_index=True)
+
+            # CSV export
+            csv = findings_df[show_cols].to_csv(index=False)
+            st.download_button(
+                "📥 Export Findings CSV", csv,
+                file_name="telemetry_findings.csv", mime="text/csv",
+                key="findings_csv_dl",
             )
-            st.bar_chart(sev_df.set_index("Severity"))
+        else:
+            st.info("No findings recorded yet.")
 
-    with col_types:
-        top_types = stats.get("top_issue_types", {})
-        if top_types:
-            st.markdown("### Top Issue Types")
-            types_df = pd.DataFrame(
-                list(top_types.items()),
-                columns=["Issue Type", "Count"],
-            )
-            st.dataframe(types_df, width="stretch", hide_index=True)
+    # ── Tab 3: LLM Analytics ────────────────────────────────────────────
+    with tab_llm:
+        st.markdown("#### LLM Call Analytics")
 
-    # ── LLM usage stats ──────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("### LLM Usage")
-    llm_col1, llm_col2 = st.columns(2)
+        # Cost by provider/model
+        if cost_data and cost_data.get("by_model"):
+            st.markdown("##### Cost by Provider / Model")
+            model_cost_df = pd.DataFrame(cost_data["by_model"])
+            if not model_cost_df.empty:
+                mc_c1, mc_c2 = st.columns([2, 1])
+                with mc_c1:
+                    if "model" in model_cost_df.columns and "cost" in model_cost_df.columns:
+                        chart_mc = model_cost_df.rename(columns={"model": "Model", "cost": "Cost ($)"})
+                        st.bar_chart(chart_mc.set_index("Model"))
+                with mc_c2:
+                    st.dataframe(model_cost_df, use_container_width=True, hide_index=True)
 
-    with llm_col1:
-        st.metric("Total LLM Calls", stats.get("total_llm_calls", 0))
-        st.metric("Total Prompt Tokens", f"{stats.get('total_prompt_tokens', 0):,}")
-
-    with llm_col2:
-        st.metric("Total Completion Tokens", f"{stats.get('total_completion_tokens', 0):,}")
+        # Token efficiency
+        st.markdown("##### Token Breakdown by Model")
         llm_usage = telemetry.get_llm_usage_stats()
         by_model = llm_usage.get("by_model", [])
         if by_model:
             llm_df = pd.DataFrame(by_model)
-            st.dataframe(llm_df, width="stretch", hide_index=True)
+            st.dataframe(llm_df, use_container_width=True, hide_index=True)
 
-    # ── Recent runs table ────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("### Recent Runs")
-    recent = telemetry.get_recent_runs(limit=25)
-    if recent:
-        display_cols = [
-            "run_id", "created_at", "mode", "status",
-            "files_analyzed", "issues_total", "issues_fixed",
-            "issues_skipped", "issues_failed", "duration_seconds",
-            "llm_model", "use_ccls",
-        ]
-        runs_df = pd.DataFrame(recent)
-        # Only show columns that exist
-        available = [c for c in display_cols if c in runs_df.columns]
-        st.dataframe(runs_df[available], width="stretch", hide_index=True)
+        # Per-call detail for a specific run
+        st.markdown("##### Per-Call Detail")
+        recent_llm = telemetry.get_recent_runs(limit=30)
+        llm_run_opts = ["(select run)"]
+        if recent_llm:
+            llm_run_opts += [r["run_id"] for r in recent_llm]
+        llm_sel_run = st.selectbox(
+            "View LLM calls for run:", llm_run_opts, key="llm_run_select",
+        )
+        if llm_sel_run and llm_sel_run != "(select run)":
+            try:
+                with telemetry._engine.connect() as conn:
+                    from sqlalchemy import text as sa_text
+                    rows = conn.execute(sa_text(
+                        "SELECT call_id, created_at, provider, model, purpose, "
+                        "file_path, chunk_index, prompt_tokens, completion_tokens, "
+                        "total_tokens, latency_ms, estimated_cost_usd, status "
+                        "FROM telemetry_llm_calls WHERE run_id = :rid "
+                        "ORDER BY created_at"
+                    ), {"rid": llm_sel_run}).fetchall()
+                if rows:
+                    cols = [
+                        "call_id", "created_at", "provider", "model", "purpose",
+                        "file_path", "chunk_index", "prompt_tokens", "completion_tokens",
+                        "total_tokens", "latency_ms", "estimated_cost_usd", "status",
+                    ]
+                    calls_df = pd.DataFrame(rows, columns=cols)
+                    st.dataframe(calls_df, use_container_width=True, hide_index=True)
 
-        # Drill-down into a run
-        run_ids = [r["run_id"] for r in recent]
-        selected_run = st.selectbox("View events for run:", ["(select)"] + run_ids)
-        if selected_run and selected_run != "(select)":
-            events = telemetry.get_run_events(selected_run)
-            if events:
-                ev_df = pd.DataFrame(events)
-                ev_cols = [c for c in [
-                    "created_at", "event_type", "file_path",
-                    "issue_type", "severity", "llm_model",
-                    "prompt_tokens", "completion_tokens", "latency_ms",
-                ] if c in ev_df.columns]
-                st.dataframe(ev_df[ev_cols], width="stretch", hide_index=True)
+                    # Latency distribution
+                    if "latency_ms" in calls_df.columns:
+                        st.markdown("##### Latency Distribution (ms)")
+                        st.bar_chart(calls_df["latency_ms"].value_counts().sort_index())
+
+                    # Summary for run
+                    sc1, sc2, sc3 = st.columns(3)
+                    sc1.metric("Calls", len(calls_df))
+                    sc2.metric("Total Tokens", f"{calls_df['total_tokens'].sum():,}")
+                    run_cost = calls_df["estimated_cost_usd"].sum()
+                    sc3.metric("Run Cost", f"${float(run_cost):,.4f}")
+                else:
+                    st.info("No LLM call records for this run.")
+            except Exception as e:
+                st.warning(f"Could not load LLM call details: {e}")
+
+    # ── Tab 4: Constraints & Quality ────────────────────────────────────
+    with tab_constraints:
+        st.markdown("#### Constraint Effectiveness & Quality")
+
+        # Constraint hits summary
+        constraint_data = telemetry.get_constraint_effectiveness()
+        if constraint_data and constraint_data.get("by_rule"):
+            st.markdown("##### Constraint Hit Summary")
+            cr_df = pd.DataFrame(constraint_data["by_rule"])
+            if not cr_df.empty:
+                st.dataframe(cr_df, use_container_width=True, hide_index=True)
+
+            by_action = constraint_data.get("by_action", {})
+            if by_action:
+                st.markdown("##### Actions Breakdown")
+                act_df = pd.DataFrame(
+                    list(by_action.items()), columns=["Action", "Count"],
+                )
+                st.bar_chart(act_df.set_index("Action"))
+        else:
+            st.info("No constraint hit data recorded yet.")
+
+        st.markdown("---")
+
+        # Agent comparison
+        st.markdown("##### Agent Comparison (Last 30 Days)")
+        agent_cmp = telemetry.get_agent_comparison(days=30)
+        if agent_cmp:
+            cmp_df = pd.DataFrame(agent_cmp)
+            if not cmp_df.empty:
+                st.dataframe(cmp_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No agent comparison data available yet.")
+
+        st.markdown("---")
+
+        # False-positive rate trend
+        st.markdown("##### False-Positive Rate (30d)")
+        if fp_data:
+            fp_detail = {
+                "Total Findings": fp_data.get("total_findings", 0),
+                "False Positives": fp_data.get("false_positives", 0),
+                "Confirmed": fp_data.get("confirmed", 0),
+                "Rate": f"{fp_data.get('false_positive_rate', 0):.1f}%",
+            }
+            st.json(fp_detail)
+        else:
+            st.info("No false-positive data available.")
+
+    # ── Tab 5: Usage Reports ────────────────────────────────────────────
+    with tab_reports:
+        st.markdown("#### Usage Reports")
+
+        rpt_col1, rpt_col2 = st.columns([1, 2])
+        with rpt_col1:
+            report_type = st.radio(
+                "Report Type", ["daily", "weekly"], key="report_type_radio",
+            )
+            if st.button("🔄 Generate Today's Report", key="gen_report_btn"):
+                try:
+                    from datetime import date as dt_date
+                    telemetry.generate_usage_report(
+                        report_date=dt_date.today().isoformat(),
+                        report_type=report_type,
+                    )
+                    st.success(f"Generated {report_type} report for today.")
+                except Exception as e:
+                    st.error(f"Report generation failed: {e}")
+
+        with rpt_col2:
+            reports = telemetry.get_usage_reports(report_type=report_type, limit=30)
+            if reports:
+                rpt_df = pd.DataFrame(reports)
+                show_rpt_cols = [c for c in [
+                    "report_date", "report_type", "total_runs", "total_files",
+                    "total_findings", "total_fixes", "total_tokens",
+                    "estimated_cost_usd",
+                ] if c in rpt_df.columns]
+                st.dataframe(rpt_df[show_rpt_cols], use_container_width=True, hide_index=True)
+
+                # CSV export
+                rpt_csv = rpt_df[show_rpt_cols].to_csv(index=False)
+                st.download_button(
+                    "📥 Export Report CSV", rpt_csv,
+                    file_name=f"usage_reports_{report_type}.csv", mime="text/csv",
+                    key="reports_csv_dl",
+                )
             else:
-                st.info("No events recorded for this run.")
-    else:
-        st.info("No runs recorded yet.")
+                st.info(f"No {report_type} reports generated yet. Click 'Generate' to create one.")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

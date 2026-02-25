@@ -249,13 +249,45 @@ class CodebasePatchAgent:
         # Temp directory for analysis artefacts
         self._temp_dir: Optional[Path] = None
 
-        # --- Context layers (initialised lazily or here) ---
+        # --- Context layers (match CodebaseLLMAgent initialisation) ---
+
+        # HeaderContextBuilder: resolve #include and extract type defs
+        # Initialised here (not lazily) so it can be passed to the
+        # StaticCallStackAnalyzer for macro/enum resolution.
+        self.header_context_builder = None
+        if HEADER_CTX_AVAILABLE:
+            try:
+                hdr_cfg = {}
+                if self.config:
+                    try:
+                        ctx = self.config.get("context", {}) if hasattr(self.config, 'get') else {}
+                        if isinstance(ctx, dict):
+                            hdr_cfg = {
+                                "include_paths": ctx.get("include_paths") or [],
+                                "max_header_depth": int(ctx.get("max_header_depth", 2)),
+                                "max_context_chars": int(ctx.get("max_context_chars", 6000)),
+                                "exclude_system_headers": ctx.get("exclude_system_headers", True),
+                            }
+                    except Exception:
+                        pass
+                self.header_context_builder = HeaderContextBuilder(
+                    codebase_path=str(self.codebase_path),
+                    **hdr_cfg,
+                )
+                # Also store as _header_builder for _resolve_file_includes() compat
+                self._header_builder = self.header_context_builder
+                self.logger.info("  HeaderContextBuilder enabled for patch review")
+            except Exception as hcb_err:
+                self.logger.debug(f"  HeaderContextBuilder init failed: {hcb_err}")
+
         # ContextValidator: per-chunk false-positive reduction
         self.context_validator = None
         if CTX_VALIDATOR_AVAILABLE:
             try:
-                self.context_validator = ContextValidator()
-                self.logger.debug("  ContextValidator enabled for patch review")
+                self.context_validator = ContextValidator(
+                    codebase_path=str(self.codebase_path),
+                )
+                self.logger.info("  ContextValidator enabled for patch review")
             except Exception as cv_err:
                 self.logger.debug(f"  ContextValidator init failed: {cv_err}")
 
@@ -263,10 +295,22 @@ class CodebasePatchAgent:
         self.call_stack_analyzer = None
         if CALL_STACK_AVAILABLE:
             try:
+                _csa_cache_dir = os.path.join(str(self.output_dir), ".cache")
                 self.call_stack_analyzer = StaticCallStackAnalyzer(
-                    codebase_root=str(self.codebase_path)
+                    codebase_path=str(self.codebase_path),
+                    exclude_dirs=list(self.exclude_dirs),
+                    exclude_globs=self.exclude_globs,
+                    header_context_builder=self.header_context_builder,
+                    use_ccls=False,
+                    ccls_navigator=None,
+                    max_trace_depth=3,
+                    max_context_chars=1200,
+                    cache_dir=_csa_cache_dir,
                 )
-                self.logger.debug("  StaticCallStackAnalyzer enabled for patch review")
+                self.logger.info(
+                    f"  StaticCallStackAnalyzer enabled for patch review "
+                    f"({self.call_stack_analyzer.index.stats()})"
+                )
             except Exception as csa_err:
                 self.logger.debug(f"  StaticCallStackAnalyzer init failed: {csa_err}")
 
@@ -999,9 +1043,9 @@ class CodebasePatchAgent:
             # Layer 2b: Header Context (struct/enum/macro definitions
             #           from included headers, filtered to this chunk)
             header_context = ""
-            if HEADER_CTX_AVAILABLE and hasattr(self, '_header_builder') and file_includes:
+            if self.header_context_builder and file_includes:
                 try:
-                    header_context = self._header_builder.build_context_for_chunk(
+                    header_context = self.header_context_builder.build_context_for_chunk(
                         chunk_text, file_includes
                     ) or ""
                     if header_context:
@@ -1009,8 +1053,15 @@ class CodebasePatchAgent:
                             f"    Header context for chunk {rng_idx+1}: "
                             f"{len(header_context)} chars injected"
                         )
+                    else:
+                        self.logger.debug(
+                            f"    Header context for chunk {rng_idx+1}: "
+                            f"empty (no referenced definitions found in {len(file_includes)} headers)"
+                        )
                 except Exception as hctx_err:
                     self.logger.debug(f"    Header context build failed: {hctx_err}")
+            elif not self.header_context_builder and file_includes:
+                self.logger.debug(f"    Header context skipped: builder=None")
 
             # Layer 2c: Context Validation (per-chunk false positive reduction)
             validation_context = ""
@@ -1170,32 +1221,19 @@ class CodebasePatchAgent:
         ``HeaderContextBuilder.build_context_for_chunk()`` per chunk.
         Mirrors the once-per-file resolution in :class:`CodebaseLLMAgent`.
         """
-        if not HEADER_CTX_AVAILABLE:
+        if not self.header_context_builder:
+            self.logger.debug(f"    Header context skipped: builder not available")
             return []
         try:
-            if not hasattr(self, '_header_builder'):
-                config_dict = {}
-                if self.config:
-                    try:
-                        config_dict = {
-                            "include_paths": self.config.get("context.include_paths") or [],
-                            "max_header_depth": self.config.get("context.max_header_depth") or 2,
-                            "max_context_chars": self.config.get("context.max_context_chars") or 6000,
-                            "exclude_system_headers": self.config.get("context.exclude_system_headers", True),
-                        }
-                    except Exception:
-                        pass
-                self._header_builder = HeaderContextBuilder(
-                    codebase_root=str(self.codebase_path),
-                    **config_dict,
-                )
-            includes = self._header_builder.resolve_includes(str(self.file_path))
+            includes = self.header_context_builder.resolve_includes(str(self.file_path))
             if includes:
                 resolved = [inc for inc in includes if inc.resolved]
-                self.logger.debug(
+                self.logger.info(
                     f"    Header includes for {filename}: "
                     f"{len(includes)} total, {len(resolved)} resolved"
                 )
+                for inc in resolved[:5]:
+                    self.logger.debug(f"      > {inc.name} -> {inc.abs_path}")
                 return includes
             else:
                 self.logger.debug(f"    No #include directives found in {filename}")

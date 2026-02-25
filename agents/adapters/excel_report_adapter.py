@@ -134,8 +134,11 @@ class ExcelReportAdapter(BaseStaticAdapter):
                 grade = result.get("grade", "F")
                 tool_available = result.get("tool_available", False)
 
-                # Score and grade
-                summary_data[f"{adapter_name} Score"] = f"{score} ({grade})"
+                # Score and grade — show "Skipped" for unavailable tools
+                if not tool_available:
+                    summary_data[f"{adapter_name} Score"] = "Skipped (tool unavailable)"
+                else:
+                    summary_data[f"{adapter_name} Score"] = f"{score} ({grade})"
 
                 # Issue count
                 issues_count = len(result.get("issues", []))

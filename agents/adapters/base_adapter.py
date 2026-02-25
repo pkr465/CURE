@@ -62,14 +62,19 @@ class BaseStaticAdapter(ABC):
     def _handle_tool_unavailable(
         self, tool_name: str, fallback_message: str = ""
     ) -> Dict[str, Any]:
-        """Standard degradation response when a required tool is missing."""
+        """Standard degradation response when a required tool is missing.
+
+        Logs at INFO level (not WARNING) because a missing optional tool
+        like CCLS is *expected* in many environments and should not look
+        like an error in the console output.
+        """
         msg = fallback_message or f"{tool_name} not available; skipping {self.adapter_name}"
-        self.logger.warning(msg)
+        self.logger.info(msg)
         return {
-            "score": 0.0,
-            "grade": "F",
+            "score": -1.0,
+            "grade": "N/A",
             "metrics": {"tool_available": False, "fallback_reason": msg},
-            "issues": [msg],
+            "issues": [],
             "details": [],
             "tool_available": False,
         }

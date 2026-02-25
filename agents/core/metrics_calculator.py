@@ -211,6 +211,13 @@ class MetricsCalculator:
                 ("function_metrics", self.function_metrics_adapter),
             ]
 
+            # Single notice when CCLS is unavailable (avoids per-adapter repetition)
+            if ccls_navigator is None:
+                logger.info(
+                    "CCLS/libclang not available — adapters that require it "
+                    "(dead_code, call_graph, function_metrics) will be skipped."
+                )
+
             for name, adapter in adapters:
                 try:
                     result = adapter.analyze(
@@ -219,12 +226,16 @@ class MetricsCalculator:
                         dependency_graph=dependency_graph,
                     )
                     adapter_results[name] = result
-                    score = result.get("score", 0)
-                    grade = result.get("grade", "F")
-                    avail = result.get("tool_available", False)
-                    logger.info(
-                        f"Adapter {name}: score={score} grade={grade} tool_available={avail}"
-                    )
+                    avail = result.get("tool_available", True)
+                    if not avail:
+                        # Adapter gracefully skipped (e.g. no CCLS) — already logged at INFO
+                        logger.info(f"  Adapter {name}: tool not available, skipped")
+                    else:
+                        score = result.get("score", 0)
+                        grade = result.get("grade", "F")
+                        logger.info(
+                            f"  Adapter {name}: score={score} grade={grade}"
+                        )
                 except Exception as exc:
                     logger.warning(f"Adapter {name} failed: {exc}")
                     adapter_results[name] = {

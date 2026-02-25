@@ -1544,8 +1544,19 @@ class CodebasePatchAgent:
         issues: List[Dict] = []
         adapter_raw: Dict[str, List[Dict]] = {}
         try:
-            # Build a minimal file cache for adapters
-            from agents.core.file_processor import FileProcessor
+            # Build a minimal file cache for adapters.
+            # Cannot use ``from agents.core.file_processor import ...``
+            # because agents/core/__init__.py also imports MetricsCalculator
+            # which depends on networkx (optional).  Use importlib to load
+            # the module file directly and skip the package __init__.
+            import importlib, importlib.util as _ilu
+            _fp_spec = _ilu.spec_from_file_location(
+                "agents.core.file_processor",
+                os.path.join(os.path.dirname(__file__), "core", "file_processor.py"),
+            )
+            _fp_mod = importlib.util.module_from_spec(_fp_spec)
+            _fp_spec.loader.exec_module(_fp_mod)
+            FileProcessor = _fp_mod.FileProcessor
 
             processor = FileProcessor(
                 codebase_path=temp_dir,

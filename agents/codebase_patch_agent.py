@@ -944,16 +944,15 @@ class CodebasePatchAgent:
         all_lines = file_content.splitlines()
         total_lines = len(all_lines)
 
-        # --- Build context layers once (they apply to the whole file) ---
-        header_context = self._gather_header_context(filename, file_content)
+        # --- Build file-level context layers (resolved once per file) ------
+        # 1. Constraints (Issue Identification Rules from .md files)
         constraints_context = self._load_constraints_for_file(filename)
-        call_stack_context = ""
-        if CALL_STACK_AVAILABLE and self.call_stack_analyzer:
-            try:
-                # Build full-file call stack index for the real codebase
-                call_stack_context = ""  # populated per-chunk below
-            except Exception:
-                pass
+
+        # 2. Header includes (resolved once, context built per-chunk below)
+        file_includes = self._resolve_file_includes(filename)
+
+        # 3. External dependencies via CCLS (if available and indexed)
+        #    — populated per-chunk below via _fetch_dependency_context()
 
         # --- Iterate over focus ranges ---
         ranges = focus_line_ranges or [(1, total_lines)]
@@ -988,7 +987,32 @@ class CodebasePatchAgent:
                 numbered.append(f"{marker} {abs_line:5d} | {line}")
             numbered_code_block = "\n".join(numbered)
 
-            # --- Per-chunk context layers ---
+            # ==============================================================
+            # Per-chunk context layers (matches CodebaseLLMAgent exactly)
+            # ==============================================================
+
+            # Layer 2a: External Dependencies via CCLS
+            dependency_context = self._fetch_dependency_context(
+                filename, chunk_start, chunk_start + chunk_line_count
+            )
+
+            # Layer 2b: Header Context (struct/enum/macro definitions
+            #           from included headers, filtered to this chunk)
+            header_context = ""
+            if HEADER_CTX_AVAILABLE and hasattr(self, '_header_builder') and file_includes:
+                try:
+                    header_context = self._header_builder.build_context_for_chunk(
+                        chunk_text, file_includes
+                    ) or ""
+                    if header_context:
+                        self.logger.debug(
+                            f"    Header context for chunk {rng_idx+1}: "
+                            f"{len(header_context)} chars injected"
+                        )
+                except Exception as hctx_err:
+                    self.logger.debug(f"    Header context build failed: {hctx_err}")
+
+            # Layer 2c: Context Validation (per-chunk false positive reduction)
             validation_context = ""
             if CTX_VALIDATOR_AVAILABLE and self.context_validator:
                 try:
@@ -996,24 +1020,48 @@ class CodebasePatchAgent:
                         chunk_text, str(self.file_path), file_content, chunk_start
                     )
                     validation_context = val_report.format_summary(max_chars=10000)
+                    if validation_context:
+                        self.logger.debug(
+                            f"    Validation context for chunk {rng_idx+1}: "
+                            f"{len(validation_context)} chars, "
+                            f"{len(val_report.validations)} symbols checked"
+                        )
                 except Exception as cv_err:
                     self.logger.debug(f"  Context validation failed: {cv_err}")
 
+            # Layer 2d: Call Stack Context (cross-function call chain tracing)
             chunk_call_stack = ""
             if CALL_STACK_AVAILABLE and self.call_stack_analyzer:
                 try:
                     chunk_call_stack = self.call_stack_analyzer.analyze_chunk(
                         chunk_text, str(self.file_path), file_content, chunk_start
                     )
+                    if chunk_call_stack:
+                        self.logger.debug(
+                            f"    Call stack context for chunk {rng_idx+1}: "
+                            f"{len(chunk_call_stack)} chars injected"
+                        )
                 except Exception as csa_err:
                     self.logger.debug(f"  Call stack analysis failed: {csa_err}")
 
-            # --- Assemble context header ---
+            # ==============================================================
+            # Assemble context header (same ordering as CodebaseLLMAgent)
+            # ==============================================================
             context_header = ""
+
+            if dependency_context:
+                context_header += (
+                    f"\n// ... [CONTEXT: External Dependencies & Definitions] ...\n"
+                    f"{dependency_context}\n"
+                    f"// ... [End External Context] ...\n"
+                )
+
             if header_context:
                 context_header += f"\n{header_context}\n"
+
             if validation_context:
                 context_header += f"\n{validation_context}\n"
+
             if chunk_call_stack:
                 context_header += f"\n{chunk_call_stack}\n"
 
@@ -1067,21 +1115,34 @@ class CodebasePatchAgent:
             ```
             """
 
-            # --- Debug: dump prompt to {output_dir}/prompt_dumps/ ---
-            if self.logger.isEnabledFor(logging.DEBUG):
+            # --- HITL: augment prompt with feedback context ---
+            if self.hitl_context:
                 try:
-                    dump_dir = os.path.join(str(self.output_dir), "prompt_dumps")
-                    os.makedirs(dump_dir, exist_ok=True)
-                    safe_name = filename.replace("/", "__").replace("\\", "__")
-                    dump_path = os.path.join(
-                        dump_dir,
-                        f"patch_{safe_name}_{label}_chunk{rng_idx + 1}.txt",
+                    final_prompt = self.hitl_context.augment_prompt(
+                        original_prompt=final_prompt,
+                        issue_type="code_quality",
+                        file_path=filename,
+                        agent_type="patch_agent",
                     )
-                    with open(dump_path, "w", encoding="utf-8") as df:
-                        df.write(final_prompt)
-                    self.logger.debug(f"    Prompt dump: {dump_path}")
-                except Exception:
-                    pass  # never fail on debug dump
+                except Exception as hitl_err:
+                    self.logger.debug(f"  HITL augment failed: {hitl_err}")
+
+            # --- Debug: dump prompt to {output_dir}/prompt_dumps/ ---
+            #     Always dump for patch reviews (not just DEBUG level)
+            #     so users can inspect what was sent to the LLM.
+            try:
+                dump_dir = os.path.join(str(self.output_dir), "prompt_dumps")
+                os.makedirs(dump_dir, exist_ok=True)
+                safe_name = filename.replace("/", "__").replace("\\", "__")
+                dump_path = os.path.join(
+                    dump_dir,
+                    f"patch_{safe_name}_{label}_chunk{rng_idx + 1}.txt",
+                )
+                with open(dump_path, "w", encoding="utf-8") as df:
+                    df.write(final_prompt)
+                self.logger.info(f"    Prompt dump: {dump_path}")
+            except Exception:
+                pass  # never fail on debug dump
 
             # --- LLM call ---
             try:
@@ -1102,10 +1163,15 @@ class CodebasePatchAgent:
     # Context helpers
     # ------------------------------------------------------------------
 
-    def _gather_header_context(self, filename: str, file_content: str) -> str:
-        """Resolve #include directives and build header context."""
+    def _resolve_file_includes(self, filename: str) -> list:
+        """Resolve #include directives once per file.
+
+        Returns a list of include objects that can be passed to
+        ``HeaderContextBuilder.build_context_for_chunk()`` per chunk.
+        Mirrors the once-per-file resolution in :class:`CodebaseLLMAgent`.
+        """
         if not HEADER_CTX_AVAILABLE:
-            return ""
+            return []
         try:
             if not hasattr(self, '_header_builder'):
                 config_dict = {}
@@ -1125,9 +1191,58 @@ class CodebasePatchAgent:
                 )
             includes = self._header_builder.resolve_includes(str(self.file_path))
             if includes:
-                return self._header_builder.build_context_for_chunk(file_content, includes) or ""
+                resolved = [inc for inc in includes if inc.resolved]
+                self.logger.debug(
+                    f"    Header includes for {filename}: "
+                    f"{len(includes)} total, {len(resolved)} resolved"
+                )
+                return includes
+            else:
+                self.logger.debug(f"    No #include directives found in {filename}")
         except Exception as hdr_err:
-            self.logger.debug(f"  Header context failed: {hdr_err}")
+            self.logger.debug(f"  Header include resolution failed: {hdr_err}")
+        return []
+
+    def _fetch_dependency_context(
+        self, rel_path: str, start_line: int, end_line: int
+    ) -> str:
+        """Fetch CCLS external dependency context for a chunk, if available.
+
+        Mirrors :meth:`CodebaseLLMAgent._fetch_chunk_dependencies`.
+        Returns an empty string if CCLS is not configured.
+        """
+        if not self.dep_config:
+            return ""
+        try:
+            from dependency_builder.dependency_service import DependencyService
+            if not hasattr(self, '_dep_service'):
+                self._dep_service = DependencyService(config=self.dep_config)
+            response = self._dep_service.perform_fetch(
+                project_root=str(self.codebase_path),
+                output_dir=str(self.output_dir),
+                codebase_identifier=self.codebase_path.name,
+                endpoint_type="fetch_dependencies_by_file",
+                file_name=rel_path,
+                start=start_line,
+                end=end_line,
+                level=1,
+            )
+            data = response.get("data", [])
+            if not data:
+                return ""
+            context_parts = []
+            if isinstance(data, list):
+                for item in data[:10]:
+                    if isinstance(item, dict):
+                        name = item.get("name", "Unknown")
+                        snippet = (item.get("definition") or item.get("snippet") or "").strip()
+                        if snippet:
+                            context_parts.append(f"// DEP: {name}\n{snippet}")
+            return "\n\n".join(context_parts)
+        except ImportError:
+            self.logger.debug("  CCLS DependencyService not available")
+        except Exception as dep_err:
+            self.logger.debug(f"  Dependency context fetch failed: {dep_err}")
         return ""
 
     def _load_constraints_for_file(self, filename: str) -> str:

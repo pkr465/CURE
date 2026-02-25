@@ -1169,7 +1169,7 @@ class CodebasePatchAgent:
                         pv_reports, max_chars=2000
                     )
                     if param_validation_context:
-                        self.logger.debug(
+                        self.logger.info(
                             f"    Param validation context for chunk {rng_idx+1}: "
                             f"{len(param_validation_context)} chars, "
                             f"{len(pv_reports)} function(s)"

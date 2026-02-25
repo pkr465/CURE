@@ -281,10 +281,16 @@ hitl:
   auto_persist_feedback: true
 
 # ────────────────────────────────────────────────────────────────────────────
-# Context — Header context injection for LLM-exclusive analysis
+# Context — Header context injection and context layers for LLM analysis
 # Parses #include'd headers to extract enum, struct, macro, typedef, and
 # function prototype definitions. Injects relevant definitions into each
 # LLM chunk to reduce false positives (e.g., enum-bounded array access).
+#
+# Context layers (all enabled by default, degrade gracefully if unavailable):
+#   1. HeaderContextBuilder  — enum/struct/macro/typedef from #include'd headers
+#   2. ContextValidator      — per-chunk pointer/bounds/return validation tracing
+#   3. StaticCallStackAnalyzer — cross-function call chain evidence
+#   4. FunctionParamValidator — per-function parameter validation status
 # ────────────────────────────────────────────────────────────────────────────
 context:
   enable_header_context: true
@@ -292,6 +298,14 @@ context:
   max_header_depth: 2              # How deep to follow #include chains (0 = direct only)
   max_context_chars: 6000          # Max chars for header context per chunk (~1500 tokens)
   exclude_system_headers: true     # Skip <stdio.h>, <stdlib.h>, etc.
+
+  # Header files to exclude from context injection.
+  # Supports exact names ("debug.h"), basenames, and fnmatch glob patterns ("debug_*.h").
+  # CLI flag --exclude-headers is MERGED with these (not replaced).
+  exclude_headers: []
+  #  - "auto_generated.h"
+  #  - "debug_*.h"
+  #  - "third_party/vendor.h"
 
 # ────────────────────────────────────────────────────────────────────────────
 # Telemetry — Silent usage tracking for framework analytics

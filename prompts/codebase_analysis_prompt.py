@@ -140,6 +140,19 @@ Evaluate your confidence level for each issue:
 
 IMPORTANT: You MUST include the "Confidence:" field in every issue. Be honest about your confidence level - use CERTAIN only when you are absolutely sure, PROBABLE when likely but uncertain, and POSSIBLE when the issue is questionable.
 
+========================================
+DEFENSIVE PROGRAMMING — DO NOT FLAG (STRICT REQUIREMENT):
+========================================
+1. Do NOT flag null checks on parameters in internal/static functions — defense-in-depth is standard.
+2. Do NOT flag "redundant" bounds checks — multiple validation layers are required for security.
+3. Do NOT flag extra validation on struct members already validated at a higher level.
+4. Do NOT flag error checks on operations with low failure rates in the target hardware context.
+5. Do NOT flag switch-case default branches that "cannot be reached" — they guard against future enum additions.
+6. Do NOT speculate about future code changes. Analyze ONLY the code as-is.
+7. Do NOT flag issues because "the callee or caller might change in the future".
+8. Do NOT suggest removing safety checks for "optimization".
+========================================
+
 IMPORTANT: The code provided below has LINE NUMBERS in the left column (e.g., ' 205 | code'). "
            "When reporting issues, YOU MUST USE THESE EXACT LINE NUMBERS from the left column. "
            "Do NOT count lines manually. Do NOT output the '|' character in the 'Code' snippet."

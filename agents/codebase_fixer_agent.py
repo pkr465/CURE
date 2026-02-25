@@ -62,6 +62,14 @@ except ImportError:
     HITLContext = None
     HITL_AVAILABLE = False
 
+# Function parameter validator (per-chunk parameter validation context)
+try:
+    from agents.context.function_param_validator import FunctionParamValidator
+    PARAM_VALIDATOR_AVAILABLE = True
+except ImportError:
+    FunctionParamValidator = None
+    PARAM_VALIDATOR_AVAILABLE = False
+
 
 class CodebaseFixerAgent:
     """
@@ -129,6 +137,17 @@ class CodebaseFixerAgent:
 
         # Initialize Dependency Service
         self._initialize_dependency_service(dep_config)
+
+        # Function Parameter Validator
+        self.param_validator = None
+        if PARAM_VALIDATOR_AVAILABLE:
+            try:
+                self.param_validator = FunctionParamValidator(
+                    codebase_path=str(self.codebase_root),
+                )
+                self.logger.info("[*] FunctionParamValidator enabled for fixer agent")
+            except Exception as fpv_err:
+                self.logger.debug(f"FunctionParamValidator init failed: {fpv_err}")
         
         
     def _initialize_llm_tools(self, llm_tools: Optional[LLMTools] = None):
@@ -672,6 +691,18 @@ class CodebaseFixerAgent:
                 f"// Use these definitions (structs, macros, globals) to ensure your fix is valid.\n"
                 f"{dependency_context}\n\n"
             )
+
+        # Function parameter validation context
+        if self.param_validator:
+            try:
+                pv_reports = self.param_validator.analyze_chunk(
+                    content, filename, content, 1
+                )
+                pv_context = self.param_validator.format_reports(pv_reports, max_chars=2000)
+                if pv_context:
+                    context_section += f"\n{pv_context}\n\n"
+            except Exception:
+                pass
 
         # ── HITL: inject constraints into fix prompt ────────────
         hitl_constraints_section = ""

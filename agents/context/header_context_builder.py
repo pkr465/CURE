@@ -266,6 +266,7 @@ class HeaderContextBuilder:
         max_definitions_per_header: int = 500,
         exclude_dirs: Optional[List[str]] = None,
         exclude_globs: Optional[List[str]] = None,
+        exclude_headers: Optional[List[str]] = None,
     ):
         self.codebase_path = Path(codebase_path).resolve()
         self.include_paths: List[Path] = []
@@ -283,9 +284,35 @@ class HeaderContextBuilder:
         self.exclude_dirs = self._DEFAULT_WALK_EXCLUDE | set(exclude_dirs or [])
         self.exclude_globs = exclude_globs or []
 
+        # User-specified headers to exclude (exact names, basenames, or glob patterns)
+        self.exclude_headers: Set[str] = set(exclude_headers or [])
+
         # Caches (persist for the lifetime of this builder instance)
         self._include_cache: Dict[str, List[ResolvedInclude]] = {}
         self._header_cache: Dict[str, HeaderDefinitions] = {}
+
+    # ─── Header Exclusion ─────────────────────────────────────────────────
+
+    def _is_header_excluded(self, inc_name: str, resolved_path: Optional[str]) -> bool:
+        """Check if a header matches the user-specified exclude list.
+
+        Checks against: exact include name, basename of include name,
+        basename of resolved path, and fnmatch glob patterns.
+        """
+        if not self.exclude_headers:
+            return False
+        basename_inc = os.path.basename(inc_name)
+        basename_resolved = os.path.basename(resolved_path) if resolved_path else ""
+        for pattern in self.exclude_headers:
+            # Exact match on include name or basenames
+            if pattern in (inc_name, basename_inc, basename_resolved):
+                return True
+            # Glob match
+            if fnmatch.fnmatch(inc_name, pattern) or fnmatch.fnmatch(basename_inc, pattern):
+                return True
+            if resolved_path and fnmatch.fnmatch(resolved_path, pattern):
+                return True
+        return False
 
     # ─── Include Resolution ──────────────────────────────────────────────
 
@@ -338,6 +365,11 @@ class HeaderContextBuilder:
                     continue
 
             resolved_path = self._resolve_include_path(inc_name, inc_type, file_dir)
+
+            # Skip user-excluded headers
+            if self._is_header_excluded(inc_name, resolved_path):
+                logger.debug("  Skipping excluded header: %s", inc_name)
+                continue
 
             ri = ResolvedInclude(
                 name=inc_name,

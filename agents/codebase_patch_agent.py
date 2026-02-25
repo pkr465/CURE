@@ -63,6 +63,14 @@ except ImportError:
     StaticCallStackAnalyzer = None
     CALL_STACK_AVAILABLE = False
 
+# Context layer: function parameter validation
+try:
+    from agents.context.function_param_validator import FunctionParamValidator
+    PARAM_VALIDATOR_AVAILABLE = True
+except ImportError:
+    FunctionParamValidator = None
+    PARAM_VALIDATOR_AVAILABLE = False
+
 # Constraint loader — reuse the one already on CodebaseLLMAgent if available,
 # otherwise we load constraints ourselves with a simple regex parser.
 try:
@@ -267,6 +275,7 @@ class CodebasePatchAgent:
                                 "max_header_depth": int(ctx.get("max_header_depth", 2)),
                                 "max_context_chars": int(ctx.get("max_context_chars", 6000)),
                                 "exclude_system_headers": ctx.get("exclude_system_headers", True),
+                                "exclude_headers": ctx.get("exclude_headers", []),
                             }
                     except Exception:
                         pass
@@ -313,6 +322,17 @@ class CodebasePatchAgent:
                 )
             except Exception as csa_err:
                 self.logger.debug(f"  StaticCallStackAnalyzer init failed: {csa_err}")
+
+        # FunctionParamValidator: per-chunk parameter validation context
+        self.param_validator = None
+        if PARAM_VALIDATOR_AVAILABLE:
+            try:
+                self.param_validator = FunctionParamValidator(
+                    codebase_path=str(self.codebase_path),
+                )
+                self.logger.info("  FunctionParamValidator enabled for patch review")
+            except Exception as fpv_err:
+                self.logger.debug(f"  FunctionParamValidator init failed: {fpv_err}")
 
     # ------------------------------------------------------------------
     # Public API
@@ -513,6 +533,19 @@ class CodebasePatchAgent:
             adapter_filtered_results=adapter_filtered_results,
         )
 
+        # -- Preserve patched file ------------------------------------------
+        patched_file_saved = ""
+        try:
+            patched_out_dir = self.output_dir / "patched_files"
+            patched_out_dir.mkdir(parents=True, exist_ok=True)
+            dest = patched_out_dir / self.filename
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(str(patched_file), str(dest))
+            patched_file_saved = str(dest)
+            self.logger.info(f"  Patched file saved: {dest}")
+        except Exception as e:
+            self.logger.warning(f"  Failed to preserve patched file: {e}")
+
         return {
             "status": "success",
             "filename": self.filename,
@@ -523,6 +556,7 @@ class CodebasePatchAgent:
             "findings": [self._finding_to_dict(f) for f in new_findings],
             "excel_path": final_excel,
             "hunks_parsed": len(hunks),
+            "patched_file_path": patched_file_saved,
         }
 
     # ------------------------------------------------------------------
@@ -1048,7 +1082,8 @@ class CodebasePatchAgent:
             numbered = []
             for idx, line in enumerate(chunk_lines):
                 abs_line = chunk_start + idx
-                marker = ">>>" if _in_exact_range(abs_line) else "   "
+                is_empty = not line.strip()
+                marker = ">>>" if (_in_exact_range(abs_line) and not is_empty) else "   "
                 numbered.append(f"{marker} {abs_line:5d} | {line}")
             numbered_code_block = "\n".join(numbered)
 
@@ -1116,6 +1151,25 @@ class CodebasePatchAgent:
                 except Exception as csa_err:
                     self.logger.debug(f"  Call stack analysis failed: {csa_err}")
 
+            # Layer 2e: Function Parameter Validation Context
+            param_validation_context = ""
+            if PARAM_VALIDATOR_AVAILABLE and self.param_validator:
+                try:
+                    pv_reports = self.param_validator.analyze_chunk(
+                        chunk_text, str(self.file_path), file_content, chunk_start
+                    )
+                    param_validation_context = self.param_validator.format_reports(
+                        pv_reports, max_chars=2000
+                    )
+                    if param_validation_context:
+                        self.logger.debug(
+                            f"    Param validation context for chunk {rng_idx+1}: "
+                            f"{len(param_validation_context)} chars, "
+                            f"{len(pv_reports)} function(s)"
+                        )
+                except Exception as fpv_err:
+                    self.logger.debug(f"  Param validation failed: {fpv_err}")
+
             # ==============================================================
             # Assemble context header (same ordering as CodebaseLLMAgent)
             # ==============================================================
@@ -1136,6 +1190,9 @@ class CodebasePatchAgent:
 
             if chunk_call_stack:
                 context_header += f"\n{chunk_call_stack}\n"
+
+            if param_validation_context:
+                context_header += f"\n{param_validation_context}\n"
 
             # --- Constraints ---
             prompt_constraints = ""

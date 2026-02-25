@@ -329,6 +329,10 @@ Examples:
     parser.add_argument("--exclude-dirs", nargs="*", default=[])
     parser.add_argument("--exclude-globs", nargs="*", default=[])
     parser.add_argument(
+        "--exclude-headers", nargs="*", default=[],
+        help="Header files to exclude from context injection (exact names, basenames, or glob patterns)."
+    )
+    parser.add_argument(
         "--generate-constraints", action="store_true",
         help="Auto-generate codebase_constraints.md from symbols and exit."
     )
@@ -1279,10 +1283,25 @@ def main():
         # Deduplicated merge (config first, then CLI additions)
         opts["exclude_dirs"] = list(dict.fromkeys(cfg_exclude_dirs + cli_exclude_dirs))
         opts["exclude_globs"] = list(dict.fromkeys(cfg_exclude_globs + cli_exclude_globs))
+        # Merge exclude_headers from config + CLI, inject back into config
+        if global_config:
+            cfg_exclude_headers = global_config.get_list("context.exclude_headers", default=[])
+        else:
+            cfg_exclude_headers = []
+        cli_exclude_headers = opts.get("exclude_headers") or []
+        merged_exclude_headers = list(dict.fromkeys(cfg_exclude_headers + cli_exclude_headers))
+        opts["exclude_headers"] = merged_exclude_headers
+        # Inject into global_config so agents read it via config.get("context", {})
+        if global_config and merged_exclude_headers:
+            ctx_data = global_config._data.setdefault("context", {})
+            ctx_data["exclude_headers"] = merged_exclude_headers
+
         if opts["exclude_dirs"]:
             console.print(f"[dim]Exclude dirs: {opts['exclude_dirs']}[/dim]")
         if opts["exclude_globs"]:
             console.print(f"[dim]Exclude globs: {opts['exclude_globs']}[/dim]")
+        if opts["exclude_headers"]:
+            console.print(f"[dim]Exclude headers: {opts['exclude_headers']}[/dim]")
 
         # ── Generate constraints mode (standalone, then exit) ─────────────
         if opts.get("generate_constraints"):

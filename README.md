@@ -88,9 +88,13 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 │   │   ├── call_graph_adapter.py       #   CCLS call graph analysis
 │   │   ├── function_metrics_adapter.py #   CCLS function metrics
 │   │   └── excel_report_adapter.py     #   static_ Excel tab generator
-│   ├── context/                        # Header context injection for LLM analysis
+│   ├── context/                        # Context layers for LLM analysis
 │   │   ├── __init__.py
-│   │   └── header_context_builder.py   #   Include resolution, header parsing, context assembly
+│   │   ├── header_context_builder.py   #   Include resolution, header parsing, context assembly
+│   │   ├── context_validator.py        #   Per-chunk pointer/bounds/return validation
+│   │   ├── static_call_stack_analyzer.py #  Cross-function call chain tracing
+│   │   ├── function_param_validator.py #   Per-function parameter validation context
+│   │   └── codebase_constraint_generator.py # Auto-generate constraint rules from symbols
 │   ├── analyzers/                      # 9 regex-based health analyzers
 │   │   ├── base_runtime_analyzer.py    #   ABC base for all analyzers
 │   │   ├── complexity_analyzer.py
@@ -161,7 +165,8 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 │   └── prompts/
 │       └── prompts.py                  # Utility prompt helpers
 ├── prompts/
-│   └── codebase_analysis_prompt.py     # LLM analysis prompt template
+│   ├── codebase_analysis_prompt.py     # LLM analysis prompt template
+│   └── patch_review_prompt.py          # Patch review prompt template
 └── ui/
     ├── app.py                          # Main Streamlit app (7 workflow tabs)
     ├── streamlit_tools.py              # Custom Streamlit helpers (sidebar, themes)
@@ -394,6 +399,7 @@ Create a file (e.g., `agents/constraints/my_driver.c_constraints.md`) using this
 | `--batch-size N`                | Files per analysis batch (default: 25)                                    |
 | `--exclude-dirs D [D]`          | Directories to exclude (merged with `scanning.exclude_dirs` config)       |
 | `--exclude-globs G [G]`         | Glob patterns to exclude (merged with `scanning.exclude_globs` config)    |
+| `--exclude-headers H [H]`      | Header files to exclude from context injection (exact names, basenames, or glob patterns) |
 | `--generate-constraints`        | Auto-generate `codebase_constraints.md` from symbols and exit             |
 | `--include-custom-constraints F [F]` | Additional custom constraint `.md` files to include in analysis      |
 | `--enable-vector-db`            | Enable vector DB ingestion pipeline                                       |
@@ -750,6 +756,7 @@ context:
   max_header_depth: 2            # How deep to follow #include chains (0 = direct only)
   max_context_chars: 6000        # Max chars for header context per chunk (~1500 tokens)
   exclude_system_headers: true   # Skip <stdio.h>, <stdlib.h>, etc.
+  exclude_headers: []            # Project headers to exclude (exact names, basenames, or globs)
 ```
 
 ### Key Design Decisions
@@ -816,6 +823,25 @@ Duplicates are automatically removed. Config entries take precedence in ordering
 | `HeaderContextBuilder` (include resolution) | Skips directories during recursive header search | Skips resolved headers matching glob patterns |
 | `CCLSIngestion` (`.ccls` config) | Converted to `%ignore .*/<dir>/.*` regex patterns | Converted to `%ignore` regex patterns |
 | Streamlit UI | Text input field (comma-separated) | Text input field (comma-separated) |
+
+### Header Exclusions
+
+Specific header files can be excluded from context injection using the `exclude_headers` config key or the `--exclude-headers` CLI flag. This is useful for excluding large auto-generated headers, third-party headers, or headers that cause noise in the analysis. Supports exact names, basenames, and fnmatch glob patterns:
+
+```yaml
+context:
+  exclude_headers:
+    - "auto_generated.h"      # Exact name match
+    - "debug_*.h"             # Glob pattern
+    - "third_party/vendor.h"  # Path-based match
+```
+
+```bash
+python main.py --llm-exclusive --codebase-path ./project \
+  --exclude-headers "auto_generated.h" "debug_*.h"
+```
+
+Config and CLI values are merged (not replaced). Excluded headers are skipped during include resolution in `HeaderContextBuilder` and will not appear in the context injected into LLM prompts.
 
 ### Built-in Defaults
 
@@ -945,6 +971,33 @@ The context validator works entirely via regex heuristics (no CCLS required). Wh
 
 The analyzer works in two modes: regex-only (always available, no CCLS required) and CCLS-enhanced (uses LSP call hierarchy when available). Index building happens once at startup (~2-5 seconds for 100K LOC), per-chunk analysis takes <50ms.
 
+### Tool 4: Function Parameter Validator (Per-Function Param Context)
+
+`agents/context/function_param_validator.py` analyzes each function definition within a code chunk and reports whether each parameter has been validated — null checks for pointers, bounds checks for indices, switch/enum range checks, and struct field access patterns. This context is injected as a C-comment block so the LLM knows which parameters are already guarded.
+
+**What it checks per parameter:**
+
+| Parameter Type | Check | Status |
+|:---------------|:------|:-------|
+| Pointer (`*ptr`) | `if (!ptr)`, `if (ptr == NULL)` | `NULL_CHECKED at line N` |
+| Index (`int idx`) | `if (idx < MAX)`, `for (i < N)` | `BOUNDS_CHECKED (idx < MAX)` |
+| Enum (`enum cmd_type cmd`) | `switch (cmd)` | `SWITCH_CHECKED` |
+| Struct pointer | `ptr->field` access patterns | `FIELDS_ACCESSED: field1, field2` |
+| Any (caller-side) | Null check at call site | `CALLER_CHECKED` |
+
+**Per-chunk output injected into prompt:**
+
+```c
+// ── FUNCTION PARAMETER VALIDATION ──
+// void process_frame(struct sk_buff* skb, int idx, enum cmd_type cmd):
+//   skb (struct sk_buff*): VALIDATED [NULL_CHECKED at line 105, FIELDS_ACCESSED: data, len]
+//   idx (int): VALIDATED [BOUNDS_CHECKED (idx >= MAX_FRAMES)]
+//   cmd (enum cmd_type): VALIDATED [SWITCH_CHECKED]
+// ── END PARAMETER VALIDATION ──
+```
+
+The validator is integrated into all three agents (LLM, Patch, Fixer) and runs after the call-stack analyzer. It uses only regex — no CCLS required. If the module fails to import, the pipeline continues without it.
+
 ### Files
 
 ```text
@@ -953,7 +1006,8 @@ agents/context/
 ├── header_context_builder.py         # Include resolution, header parsing, context assembly
 ├── codebase_constraint_generator.py  # Tool 1: symbol extraction + constraint rule generation
 ├── context_validator.py              # Tool 2: per-chunk validation context builder
-└── static_call_stack_analyzer.py     # Tool 3: codebase-wide call chain tracing
+├── static_call_stack_analyzer.py     # Tool 3: codebase-wide call chain tracing
+└── function_param_validator.py       # Tool 4: per-function parameter validation context
 
 agents/constraints/
 ├── codebase_constraints.md           # Auto-generated output (after running Tool 1)
@@ -962,7 +1016,29 @@ agents/constraints/
 └── GENERATE_CONSTRAINTS_PROMPT.md    # LLM prompt for constraint generation
 ```
 
-Modified: `agents/codebase_llm_agent.py` (ContextValidator integration, `codebase_constraints.md` loading, custom constraint loading, StaticCallStackAnalyzer integration), `main.py` (`--generate-constraints` flag, `--include-custom-constraints` flag), `ui/app.py` (auto-generate button in Constraints tab, custom constraint file input), `ui/background_workers.py` (custom constraints wiring).
+Modified: `agents/codebase_llm_agent.py` (ContextValidator, StaticCallStackAnalyzer, FunctionParamValidator integration, `codebase_constraints.md` loading, custom constraint loading), `agents/codebase_patch_agent.py` (all context layers, patched file preservation, empty line filtering), `agents/codebase_fixer_agent.py` (FunctionParamValidator integration), `main.py` (`--generate-constraints`, `--include-custom-constraints`, `--exclude-headers` flags), `ui/app.py` (auto-generate button in Constraints tab, custom constraint file input), `ui/background_workers.py` (custom constraints wiring).
+
+---
+
+## Patch Agent Features
+
+The `CodebasePatchAgent` (`agents/codebase_patch_agent.py`) analyzes code patches (unified, context, normal, or combined diff formats) and reports only issues introduced by the patch — not pre-existing bugs.
+
+### Patched File Preservation
+
+After analysis, the patched file is automatically saved to `./out/patched_files/<filename>` so it can be inspected or used for further processing. The file path is included in the return dict as `patched_file_path`.
+
+### Empty Line Filtering
+
+Empty and whitespace-only lines within patch hunks are excluded from `>>>` marker tagging. This prevents the LLM from wasting attention on blank lines and reduces noise in the analysis.
+
+### Static Analysis Adapters
+
+The patch agent runs all 5 deep static adapters on both original and patched files for apples-to-apples diffing: `ast_complexity`, `security`, `dead_code`, `call_graph`, and `function_metrics`. Results scoped to the patch hunk ranges are written to `patch_static_<name>` tabs in the Excel output.
+
+### Defensive Programming Rules
+
+Both the LLM analysis prompt and patch review prompt include strict rules preventing the LLM from flagging defensive programming patterns as bugs — redundant null checks, multi-layer bounds validation, switch default branches, and defense-in-depth patterns are all explicitly excluded from issue reporting.
 
 ---
 

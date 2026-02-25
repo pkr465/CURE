@@ -65,6 +65,14 @@ except ImportError:
     StaticCallStackAnalyzer = None
     CALL_STACK_ANALYZER_AVAILABLE = False
 
+# Function parameter validator (per-chunk parameter validation context)
+try:
+    from agents.context.function_param_validator import FunctionParamValidator
+    PARAM_VALIDATOR_AVAILABLE = True
+except ImportError:
+    FunctionParamValidator = None
+    PARAM_VALIDATOR_AVAILABLE = False
+
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -217,6 +225,7 @@ class CodebaseLLMAgent:
                         exclude_system_headers=context_cfg.get("exclude_system_headers", True),
                         exclude_dirs=list(self.exclude_dirs),
                         exclude_globs=self.exclude_globs,
+                        exclude_headers=context_cfg.get("exclude_headers", []),
                     )
                     logger.info(
                         f"[*] Header Context Builder ENABLED "
@@ -263,6 +272,17 @@ class CodebaseLLMAgent:
                 )
             except Exception as csa_err:
                 logger.warning(f"Call Stack Analyzer init failed: {csa_err}")
+
+        # --- Function Parameter Validator ---
+        self.param_validator = None
+        if PARAM_VALIDATOR_AVAILABLE:
+            try:
+                self.param_validator = FunctionParamValidator(
+                    codebase_path=str(self.codebase_path),
+                )
+                logger.info("[*] Function Parameter Validator ENABLED")
+            except Exception as fpv_err:
+                logger.warning(f"Function Parameter Validator init failed: {fpv_err}")
 
     def _extract_constraint_section(self, content: str, keyword: str) -> str:
         """
@@ -656,6 +676,25 @@ class CodebaseLLMAgent:
                     except Exception as csa_err:
                         logger.debug(f"    Call stack analysis failed: {csa_err}")
 
+                # 2e. Function Parameter Validation Context
+                param_validation_context = ""
+                if self.param_validator:
+                    try:
+                        pv_reports = self.param_validator.analyze_chunk(
+                            chunk_text, str(file_path), code_content, start_line
+                        )
+                        param_validation_context = self.param_validator.format_reports(
+                            pv_reports, max_chars=2000
+                        )
+                        if param_validation_context:
+                            logger.debug(
+                                f"    Param validation context for chunk {chunk_idx+1}: "
+                                f"{len(param_validation_context)} chars, "
+                                f"{len(pv_reports)} function(s)"
+                            )
+                    except Exception as fpv_err:
+                        logger.debug(f"    Param validation failed: {fpv_err}")
+
                 # 3. Context Construction (Previous Chunk Tail + Dependencies + Header Defs)
                 context_header = ""
                 if prev_chunk_tail:
@@ -684,6 +723,11 @@ class CodebaseLLMAgent:
                 if call_stack_context:
                     context_header += (
                         f"\n{call_stack_context}\n"
+                    )
+
+                if param_validation_context:
+                    context_header += (
+                        f"\n{param_validation_context}\n"
                     )
 
                 final_chunk_text = (

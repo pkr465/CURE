@@ -61,6 +61,11 @@
     category (Section C), **IGNORE** NULL checks on all intermediate pointers in the chain.
     The chain is only as strong as its root — and in embedded code, the root is validated at entry.
 
+### G. Defensive Programming (Not a Bug)
+*   **IGNORE**: Extra null checks, multi-layer bounds validation, error checks on low-failure ops, switch default branches
+*   **DO NOT** suggest removing defensive checks
+*   **DO NOT** flag issues based on speculation about future code changes
+
 ---
 
 ## 2. Issue Resolution Rules

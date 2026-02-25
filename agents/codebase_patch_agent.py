@@ -470,22 +470,33 @@ class CodebasePatchAgent:
                 reason.append("PATCH_REVIEW_PROMPT not found")
             self.logger.warning(f"  Skipping LLM analysis — {', '.join(reason)}")
 
-        # -- Run static adapters on patched file (optional — user must enable) --
-        static_issues: List[Dict] = []
+        # -- Run static adapters (optional — user must enable) --
+        # Run on BOTH original and patched so _diff_findings can properly
+        # filter out pre-existing static issues (apples-to-apples comparison).
+        static_orig_issues: List[Dict] = []
+        static_patched_issues: List[Dict] = []
         adapter_raw_results: Dict[str, List[Dict]] = {}
         if self.enable_adapters and ADAPTERS_AVAILABLE:
-            self.logger.info("  Running static adapters on patched file...")
-            static_issues, adapter_raw_results = self._run_static_analysis(
-                str(patched_dir), self.filename,
-                focus_line_ranges=patched_exact,  # use EXACT hunk ranges
+            self.logger.info("  Running static adapters on original file...")
+            static_orig_issues, _ = self._run_static_analysis(
+                str(orig_dir), self.filename,
+                focus_line_ranges=orig_exact,
             )
-            self.logger.info(f"  Static analysis: {len(static_issues)} issue(s) found")
+            self.logger.info(f"  Static analysis (original): {len(static_orig_issues)} issue(s)")
 
-        # Merge patched_issues + static_issues
-        all_patched_issues = patched_issues + static_issues
+            self.logger.info("  Running static adapters on patched file...")
+            static_patched_issues, adapter_raw_results = self._run_static_analysis(
+                str(patched_dir), self.filename,
+                focus_line_ranges=patched_exact,
+            )
+            self.logger.info(f"  Static analysis (patched): {len(static_patched_issues)} issue(s)")
+
+        # Merge LLM + static issues for each version
+        all_original_issues = original_issues + static_orig_issues
+        all_patched_issues = patched_issues + static_patched_issues
 
         # -- Diff findings --------------------------------------------------
-        new_findings = self._diff_findings(original_issues, all_patched_issues, hunks)
+        new_findings = self._diff_findings(all_original_issues, all_patched_issues, hunks)
         self.logger.info(f"  New issues introduced by patch: {len(new_findings)}")
 
         # -- Write to Excel -------------------------------------------------
@@ -496,7 +507,7 @@ class CodebasePatchAgent:
             "status": "success",
             "filename": self.filename,
             "patch_file": str(self.patch_file),
-            "original_issue_count": len(original_issues),
+            "original_issue_count": len(all_original_issues),
             "patched_issue_count": len(all_patched_issues),
             "new_issue_count": len(new_findings),
             "findings": [self._finding_to_dict(f) for f in new_findings],
@@ -1574,50 +1585,69 @@ class CodebasePatchAgent:
                     result = adapter.analyze(
                         file_cache, ccls_navigator=None, dependency_graph={}
                     )
-                    if result.get("tool_available", False):
-                        # Extract issues from adapter results — use 'details'
-                        # (per-finding dicts from BaseStaticAdapter._make_detail)
-                        # falling back to 'findings' / 'issues' for compat.
-                        raw_findings = (
-                            result.get("details")
-                            or result.get("findings")
-                            or result.get("issues", [])
-                        )
-                        filtered_details: List[Dict] = []
-                        for finding in raw_findings:
-                            if not isinstance(finding, dict):
-                                continue
-                            line_num = finding.get("line", 0)
-                            # --- Patch scope filter (exact hunk ranges) ---
-                            if not _in_focus(line_num):
-                                continue
-                            filtered_details.append(finding)
-                            issues.append({
-                                "file_path": finding.get("file", filename),
-                                "line_number": line_num,
-                                "title": finding.get("description", finding.get("message", ""))[:80],
-                                "severity": finding.get("severity", "medium"),
-                                "confidence": "CERTAIN",
-                                "category": f"static_{name}",
-                                "description": finding.get("description", finding.get("message", "")),
-                                "suggestion": "",
-                                "code": finding.get("code", ""),
-                                "fixed_code": "",
-                                "source": f"static_{name}",
-                            })
-                        if filtered_details:
-                            adapter_raw[name] = filtered_details
+                    if not result.get("tool_available", False):
+                        self.logger.info(f"    Adapter {name}: tool not available, skipped")
+                        continue
+
+                    # Extract per-finding detail dicts.
+                    # Use explicit None check — an empty list [] means "ran
+                    # but found nothing" and should NOT fall through.
+                    raw_findings = result.get("details")
+                    if raw_findings is None:
+                        raw_findings = result.get("findings")
+                    if raw_findings is None:
+                        raw_findings = []
+
+                    self.logger.info(
+                        f"    Adapter {name}: {len(raw_findings)} total finding(s) "
+                        f"before patch-scope filter"
+                    )
+
+                    filtered_details: List[Dict] = []
+                    for finding in raw_findings:
+                        if not isinstance(finding, dict):
+                            continue
+                        line_num = finding.get("line", 0)
+                        # --- Patch scope filter (exact hunk ranges) ---
+                        if not _in_focus(line_num):
+                            continue
+                        filtered_details.append(finding)
+                        issues.append({
+                            "file_path": finding.get("file", filename),
+                            "line_number": line_num,
+                            "title": finding.get("description", finding.get("message", ""))[:80],
+                            "severity": finding.get("severity", "medium"),
+                            "confidence": "CERTAIN",
+                            "category": f"static_{name}",
+                            "description": finding.get("description", finding.get("message", "")),
+                            "suggestion": "",
+                            "code": finding.get("code", ""),
+                            "fixed_code": "",
+                            "source": f"static_{name}",
+                        })
+                    if filtered_details:
+                        adapter_raw[name] = filtered_details
+                    self.logger.info(
+                        f"    Adapter {name}: {len(filtered_details)} finding(s) "
+                        f"after patch-scope filter"
+                    )
                 except Exception as exc:
                     self.logger.warning(f"Adapter {name} failed: {exc}")
 
-        except ImportError:
-            self.logger.warning("FileProcessor not available — skipping static analysis")
+        except ImportError as imp_err:
+            self.logger.warning(f"FileProcessor not available — skipping static analysis: {imp_err}")
         except Exception as exc:
             self.logger.warning(f"Static analysis failed: {exc}")
 
-        self.logger.info(
-            f"  Static adapters: {len(issues)} issue(s) after patch-scope filtering"
-        )
+        if focus_line_ranges:
+            self.logger.info(
+                f"  Static adapters: {len(issues)} issue(s) in hunk ranges "
+                f"{focus_line_ranges}"
+            )
+        else:
+            self.logger.info(
+                f"  Static adapters: {len(issues)} issue(s) (no range filter)"
+            )
         return issues, adapter_raw
 
     # ------------------------------------------------------------------

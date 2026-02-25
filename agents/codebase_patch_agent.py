@@ -473,21 +473,27 @@ class CodebasePatchAgent:
         # -- Run static adapters (optional — user must enable) --
         # Run on BOTH original and patched so _diff_findings can properly
         # filter out pre-existing static issues (apples-to-apples comparison).
+        # We collect TWO sets of adapter results:
+        #   - filtered (hunk-scoped) → fed into _diff_findings
+        #   - unfiltered (full file) → written to patch_static_* Excel tabs
         static_orig_issues: List[Dict] = []
         static_patched_issues: List[Dict] = []
-        adapter_raw_results: Dict[str, List[Dict]] = {}
+        adapter_filtered_results: Dict[str, List[Dict]] = {}   # hunk-scoped only
+        adapter_full_results: Dict[str, List[Dict]] = {}        # entire file
         if self.enable_adapters and ADAPTERS_AVAILABLE:
             self.logger.info("  Running static adapters on original file...")
-            static_orig_issues, _ = self._run_static_analysis(
+            static_orig_issues, _, _ = self._run_static_analysis(
                 str(orig_dir), self.filename,
                 focus_line_ranges=orig_exact,
             )
             self.logger.info(f"  Static analysis (original): {len(static_orig_issues)} issue(s)")
 
             self.logger.info("  Running static adapters on patched file...")
-            static_patched_issues, adapter_raw_results = self._run_static_analysis(
-                str(patched_dir), self.filename,
-                focus_line_ranges=patched_exact,
+            static_patched_issues, adapter_filtered_results, adapter_full_results = (
+                self._run_static_analysis(
+                    str(patched_dir), self.filename,
+                    focus_line_ranges=patched_exact,
+                )
             )
             self.logger.info(f"  Static analysis (patched): {len(static_patched_issues)} issue(s)")
 
@@ -501,7 +507,11 @@ class CodebasePatchAgent:
 
         # -- Write to Excel -------------------------------------------------
         final_excel = excel_path or str(self.output_dir / "detailed_code_review.xlsx")
-        self._update_excel(final_excel, new_findings, adapter_raw_results)
+        self._update_excel(
+            final_excel, new_findings,
+            adapter_full_results=adapter_full_results,
+            adapter_filtered_results=adapter_filtered_results,
+        )
 
         return {
             "status": "success",
@@ -1527,21 +1537,27 @@ class CodebasePatchAgent:
     def _run_static_analysis(
         self, temp_dir: str, filename: str,
         focus_line_ranges: Optional[List[tuple]] = None,
-    ) -> Tuple[List[Dict], Dict[str, List[Dict]]]:
-        """Run static analysis adapters on the patched file.
+    ) -> Tuple[List[Dict], Dict[str, List[Dict]], Dict[str, List[Dict]]]:
+        """Run static analysis adapters on a file in *temp_dir*.
 
         When ``focus_line_ranges`` is provided, only findings whose line
-        number falls within one of the (start, end) ranges are kept.
-        This prevents the adapters (which always scan the whole file)
-        from flooding the output with pre-existing issues.
+        number falls within one of the (start, end) ranges are kept for
+        the **diff pipeline**.  The full (unfiltered) adapter results are
+        always returned separately so they can be written to dedicated
+        Excel tabs regardless of whether any findings fall inside the
+        patch hunks.
 
         Returns:
-            Tuple of (merged_issues, per_adapter_results) where
-            per_adapter_results maps adapter name → list of raw detail dicts
-            for separate Excel tabs.
+            3-tuple of:
+              * ``filtered_issues`` — dicts that passed the hunk-scope
+                filter (fed into ``_diff_findings``).
+              * ``filtered_adapter_raw`` — adapter_name → filtered detail
+                dicts (only in-scope findings).
+              * ``all_adapter_raw`` — adapter_name → **all** detail dicts
+                from the full file (for ``patch_static_*`` Excel tabs).
         """
         if not ADAPTERS_AVAILABLE:
-            return [], {}
+            return [], {}, {}
 
         def _in_focus(line: int) -> bool:
             """Return True if *line* falls within any exact hunk range."""
@@ -1553,7 +1569,8 @@ class CodebasePatchAgent:
             return False
 
         issues: List[Dict] = []
-        adapter_raw: Dict[str, List[Dict]] = {}
+        filtered_adapter_raw: Dict[str, List[Dict]] = {}
+        all_adapter_raw: Dict[str, List[Dict]] = {}
         try:
             # Build a minimal file cache for adapters.
             # Cannot use ``from agents.core.file_processor import ...``
@@ -1575,9 +1592,13 @@ class CodebasePatchAgent:
             )
             file_cache = processor.process_files()
 
+            # All 5 adapters — matches MetricsCalculator._run_adapters()
             adapters = [
                 ("ast_complexity", ASTComplexityAdapter()),
                 ("security", SecurityAdapter()),
+                ("dead_code", DeadCodeAdapter()),
+                ("call_graph", CallGraphAdapter()),
+                ("function_metrics", FunctionMetricsAdapter()),
             ]
 
             for name, adapter in adapters:
@@ -1598,17 +1619,20 @@ class CodebasePatchAgent:
                     if raw_findings is None:
                         raw_findings = []
 
+                    # Keep ALL findings (unfiltered) for the Excel tabs
+                    valid_findings = [f for f in raw_findings if isinstance(f, dict)]
+                    if valid_findings:
+                        all_adapter_raw[name] = valid_findings
+
                     self.logger.info(
-                        f"    Adapter {name}: {len(raw_findings)} total finding(s) "
+                        f"    Adapter {name}: {len(valid_findings)} total finding(s) "
                         f"before patch-scope filter"
                     )
 
+                    # Apply hunk-scope filter for the diff pipeline
                     filtered_details: List[Dict] = []
-                    for finding in raw_findings:
-                        if not isinstance(finding, dict):
-                            continue
+                    for finding in valid_findings:
                         line_num = finding.get("line", 0)
-                        # --- Patch scope filter (exact hunk ranges) ---
                         if not _in_focus(line_num):
                             continue
                         filtered_details.append(finding)
@@ -1626,7 +1650,7 @@ class CodebasePatchAgent:
                             "source": f"static_{name}",
                         })
                     if filtered_details:
-                        adapter_raw[name] = filtered_details
+                        filtered_adapter_raw[name] = filtered_details
                     self.logger.info(
                         f"    Adapter {name}: {len(filtered_details)} finding(s) "
                         f"after patch-scope filter"
@@ -1648,7 +1672,7 @@ class CodebasePatchAgent:
             self.logger.info(
                 f"  Static adapters: {len(issues)} issue(s) (no range filter)"
             )
-        return issues, adapter_raw
+        return issues, filtered_adapter_raw, all_adapter_raw
 
     # ------------------------------------------------------------------
     # Findings diff
@@ -1742,9 +1766,14 @@ class CodebasePatchAgent:
 
     def _update_excel(
         self, excel_path: str, findings: List[PatchFinding],
-        adapter_results: Optional[Dict[str, List[Dict]]] = None,
+        adapter_full_results: Optional[Dict[str, List[Dict]]] = None,
+        adapter_filtered_results: Optional[Dict[str, List[Dict]]] = None,
     ) -> None:
         """Write patch findings to a ``patch_<filename>`` tab in the Excel file.
+
+        Creates two sets of static adapter tabs:
+            * ``static_<name>``       — full-file findings (all issues found)
+            * ``patch_static_<name>`` — patch-scoped findings (hunk ranges only)
 
         The column layout matches the main ``Analysis`` sheet produced by
         :class:`CodebaseLLMAgent` so the fixer agent can consume it:
@@ -1862,8 +1891,10 @@ class CodebasePatchAgent:
                     last_col = openpyxl.utils.get_column_letter(len(headers))
                     ws.auto_filter.ref = f"A1:{last_col}{len(data_rows) + 1}"
 
-                    # Write separate static adapter tabs if adapters were run
-                    self._write_adapter_tabs_openpyxl(wb, adapter_results)
+                    # Write patch-scoped static adapter tabs
+                    self._write_adapter_tabs_openpyxl(
+                        wb, adapter_filtered_results, prefix="patch_static",
+                    )
 
                     wb.save(str(excel_file))
                     self.logger.info(
@@ -1887,13 +1918,13 @@ class CodebasePatchAgent:
                 status_column="Severity",
             )
 
-            # Append separate static adapter tabs
-            if adapter_results:
+            # Append patch-scoped static adapter tabs
+            if adapter_filtered_results:
                 adapter_headers = [
                     "File", "Function", "Line", "Description",
                     "Severity", "Category", "CWE",
                 ]
-                for adapter_name, details in adapter_results.items():
+                for adapter_name, details in adapter_filtered_results.items():
                     if not details:
                         continue
                     tab_name = f"patch_static_{adapter_name}"[:31]
@@ -1925,11 +1956,14 @@ class CodebasePatchAgent:
             self._write_findings_json(findings)
 
     def _write_adapter_tabs_openpyxl(
-        self, wb: Any, adapter_results: Optional[Dict[str, List[Dict]]]
+        self, wb: Any, adapter_results: Optional[Dict[str, List[Dict]]],
+        prefix: str = "patch_static",
     ) -> None:
         """Write per-adapter static analysis tabs to an existing openpyxl workbook.
 
-        Matches the ``static_<adapter>`` tab format from :class:`CodebaseLLMAgent`.
+        *prefix* controls the tab naming:
+            * ``"static"``       → ``static_<adapter>``       (full-file)
+            * ``"patch_static"`` → ``patch_static_<adapter>`` (hunk-scoped)
         """
         if not adapter_results:
             return
@@ -1953,7 +1987,7 @@ class CodebasePatchAgent:
             for adapter_name, details in adapter_results.items():
                 if not details:
                     continue
-                tab_name = f"patch_static_{adapter_name}"[:31]
+                tab_name = f"{prefix}_{adapter_name}"[:31]
 
                 # Remove existing tab
                 if tab_name in wb.sheetnames:

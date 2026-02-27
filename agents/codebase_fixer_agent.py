@@ -513,12 +513,12 @@ class CodebaseFixerAgent:
                             )
                         continue
                     if struct_msg:
-                        self.logger.warning(f"Structure warnings (chunk {i+1}): {struct_msg}")
+                        self.logger.debug(f"Structure notes (chunk {i+1}): {struct_msg}")
 
                     # ── Diff validation (advisory — never rejects) ──
                     diff_msg = self._validate_fix_diff(chunk_text, fixed_chunk, filename)
                     if diff_msg:
-                        self.logger.warning(f"Diff warnings (chunk {i+1}): {diff_msg}")
+                        self.logger.debug(f"Diff notes (chunk {i+1}): {diff_msg}")
 
                     # ── Truncation check ──
                     if len(fixed_chunk) < len(chunk_text) * 0.4:
@@ -529,7 +529,16 @@ class CodebaseFixerAgent:
                     else:
                         final_pieces.append(fixed_chunk)
                         issues_resolved_so_far += len(chunk_tasks)
-                        self.logger.info(f"Done in {duration}s.")
+                        # Print each fixed issue on screen
+                        for idx, t in enumerate(chunk_tasks):
+                            issue_line = t.get("line_number", "?")
+                            issue_type = t.get("issue_type", "unknown")
+                            severity = t.get("severity", "")
+                            self.logger.info(
+                                f"    [FIXED] Issue #{issues_resolved_so_far - len(chunk_tasks) + idx + 1}: "
+                                f"L{issue_line} {issue_type} ({severity})"
+                            )
+                        self.logger.info(f"    Chunk {i+1} done in {duration}s — {len(chunk_tasks)} issue(s) fixed.")
 
                         for t in chunk_tasks:
                             details_str = f"Fixed in Chunk {i+1}"

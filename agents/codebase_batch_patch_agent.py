@@ -286,51 +286,230 @@ def apply_patch(source: str, hunks: List[PatchHunk]) -> str:
 # Multi-File Patch Parser
 # ──────────────────────────────────────────────────────────────────────────────
 
-# Header regex:  === <server_path> — <local_path>
-# The dash between paths can be ' — ' (em-dash) or ' - ' (hyphen)
+# Format 1:  === <server_path> — <local_path>
+#            (em-dash or hyphen separator, 3 equal signs)
 _FILE_HEADER_RE = re.compile(
     r"^===\s+(.+?)\s+[\u2014\-]+\s+(.+)$"
 )
 
+# Format 2:  ==== <server_path>#<rev> - <local_path> ====
+#            (Perforce standard diff header, 4 equal signs)
+_P4_HEADER_RE = re.compile(
+    r"^====\s+(.+?)\s+[\u2014\-]+\s+(.+?)\s*={0,4}$"
+)
 
-def parse_multi_file_patch(patch_text: str) -> List[FileEntry]:
-    """Parse a multi-file patch with ``===`` file headers.
+# Format 3:  --- a/<path>  /  +++ b/<path>
+#            (Standard unified diff file headers, e.g. git diff)
+_UNIFIED_MINUS_RE = re.compile(r"^---\s+(?:a/)?(.+?)(?:\t.*)?$")
+_UNIFIED_PLUS_RE = re.compile(r"^\+\+\+\s+(?:b/)?(.+?)(?:\t.*)?$")
 
-    Returns a list of :class:`FileEntry` objects, one per file section.
-    """
+# Format 4:  diff --git a/<path> b/<path>
+_GIT_DIFF_RE = re.compile(r"^diff\s+--git\s+a/(.+?)\s+b/(.+)$")
+
+# Format 5:  diff <flags> <path_a> <path_b>   (plain diff command output)
+_PLAIN_DIFF_RE = re.compile(r"^diff\s+(?:-\S+\s+)*(\S+)\s+(\S+)$")
+
+
+def _is_file_header(line: str) -> bool:
+    """Return True if the line looks like any multi-file separator."""
+    return bool(
+        _FILE_HEADER_RE.match(line)
+        or _P4_HEADER_RE.match(line)
+        or _GIT_DIFF_RE.match(line)
+        or _PLAIN_DIFF_RE.match(line)
+    )
+
+
+def _parse_triple_eq(lines: List[str]) -> List[FileEntry]:
+    """Parse ``=== server — local`` format."""
     entries: List[FileEntry] = []
-    lines = patch_text.splitlines(keepends=True)
     i, n = 0, len(lines)
-
     while i < n:
         line = lines[i].rstrip("\n\r")
         m = _FILE_HEADER_RE.match(line)
         if not m:
             i += 1
             continue
-
         server_path = m.group(1).strip()
         local_path = m.group(2).strip()
         i += 1
-
-        # Collect diff body until next === header or EOF
-        body_lines: List[str] = []
+        body: List[str] = []
         while i < n:
-            next_line = lines[i].rstrip("\n\r")
-            if _FILE_HEADER_RE.match(next_line):
+            nl = lines[i].rstrip("\n\r")
+            if _FILE_HEADER_RE.match(nl):
                 break
-            body_lines.append(next_line)
+            body.append(nl)
             i += 1
-
-        diff_body = "\n".join(body_lines).strip()
+        diff_body = "\n".join(body).strip()
         if diff_body:
-            entries.append(FileEntry(
-                server_path=server_path,
-                local_path=local_path,
-                diff_body=diff_body,
-            ))
+            entries.append(FileEntry(server_path=server_path, local_path=local_path, diff_body=diff_body))
+    return entries
+
+
+def _parse_p4_header(lines: List[str]) -> List[FileEntry]:
+    """Parse ``==== depot#rev - local ====`` Perforce format."""
+    entries: List[FileEntry] = []
+    i, n = 0, len(lines)
+    while i < n:
+        line = lines[i].rstrip("\n\r")
+        m = _P4_HEADER_RE.match(line)
+        if not m:
+            i += 1
+            continue
+        server_path = m.group(1).strip()
+        local_path = m.group(2).strip()
+        i += 1
+        body: List[str] = []
+        while i < n:
+            nl = lines[i].rstrip("\n\r")
+            if _P4_HEADER_RE.match(nl):
+                break
+            body.append(nl)
+            i += 1
+        diff_body = "\n".join(body).strip()
+        if diff_body:
+            entries.append(FileEntry(server_path=server_path, local_path=local_path, diff_body=diff_body))
+    return entries
+
+
+def _parse_unified_headers(lines: List[str]) -> List[FileEntry]:
+    """Parse standard unified diff (``--- a/`` / ``+++ b/``) or ``diff --git``."""
+    entries: List[FileEntry] = []
+    i, n = 0, len(lines)
+
+    while i < n:
+        line = lines[i].rstrip("\n\r")
+
+        # Try ``diff --git a/X b/X`` first
+        gm = _GIT_DIFF_RE.match(line)
+        if gm:
+            server_path = gm.group(1).strip()
+            local_path = gm.group(2).strip()
+            i += 1
+            # Skip optional index/mode lines and --- / +++ lines
+            while i < n:
+                peek = lines[i].rstrip("\n\r")
+                if peek.startswith("---") or peek.startswith("+++") or peek.startswith("index ") \
+                        or peek.startswith("old mode") or peek.startswith("new mode") \
+                        or peek.startswith("new file") or peek.startswith("deleted file"):
+                    # Possibly update local_path from +++ line
+                    pm = _UNIFIED_PLUS_RE.match(peek)
+                    if pm:
+                        local_path = pm.group(1).strip()
+                    i += 1
+                else:
+                    break
+            body: List[str] = []
+            while i < n:
+                nl = lines[i].rstrip("\n\r")
+                if _GIT_DIFF_RE.match(nl) or _PLAIN_DIFF_RE.match(nl):
+                    break
+                body.append(nl)
+                i += 1
+            diff_body = "\n".join(body).strip()
+            if diff_body:
+                entries.append(FileEntry(server_path=server_path, local_path=local_path, diff_body=diff_body))
+            continue
+
+        # Try ``diff <flags> <a> <b>``
+        dm = _PLAIN_DIFF_RE.match(line)
+        if dm:
+            server_path = dm.group(1).strip()
+            local_path = dm.group(2).strip()
+            i += 1
+            # Skip --- / +++ lines that follow
+            while i < n:
+                peek = lines[i].rstrip("\n\r")
+                if peek.startswith("---") or peek.startswith("+++"):
+                    pm = _UNIFIED_PLUS_RE.match(peek)
+                    if pm:
+                        local_path = pm.group(1).strip()
+                    i += 1
+                else:
+                    break
+            body = []
+            while i < n:
+                nl = lines[i].rstrip("\n\r")
+                if _GIT_DIFF_RE.match(nl) or _PLAIN_DIFF_RE.match(nl):
+                    break
+                body.append(nl)
+                i += 1
+            diff_body = "\n".join(body).strip()
+            if diff_body:
+                entries.append(FileEntry(server_path=server_path, local_path=local_path, diff_body=diff_body))
+            continue
+
+        # Try bare ``--- a/X`` / ``+++ b/X`` pair (no diff header line)
+        mm = _UNIFIED_MINUS_RE.match(line)
+        if mm and (i + 1 < n):
+            next_line = lines[i + 1].rstrip("\n\r")
+            pm = _UNIFIED_PLUS_RE.match(next_line)
+            if pm:
+                server_path = mm.group(1).strip()
+                local_path = pm.group(1).strip()
+                i += 2
+                body = []
+                while i < n:
+                    nl = lines[i].rstrip("\n\r")
+                    if _UNIFIED_MINUS_RE.match(nl) or _GIT_DIFF_RE.match(nl) or _PLAIN_DIFF_RE.match(nl):
+                        break
+                    body.append(nl)
+                    i += 1
+                diff_body = "\n".join(body).strip()
+                if diff_body:
+                    entries.append(FileEntry(server_path=server_path, local_path=local_path, diff_body=diff_body))
+                continue
+
+        i += 1
 
     return entries
+
+
+def parse_multi_file_patch(patch_text: str) -> List[FileEntry]:
+    """Parse a multi-file patch, auto-detecting the header format.
+
+    Supported formats:
+
+    1. ``=== <server_path> — <local_path>``  (CURE / custom)
+    2. ``==== <depot_path>#rev - <local_path> ====``  (Perforce)
+    3. ``diff --git a/<path> b/<path>``  (Git)
+    4. ``diff [-flags] <path_a> <path_b>``  (plain diff)
+    5. ``--- a/<path>`` / ``+++ b/<path>``  (unified diff headers)
+
+    Returns a list of :class:`FileEntry` objects, one per file section.
+    """
+    lines = patch_text.splitlines(keepends=True)
+
+    # Quick scan to detect the dominant format
+    has_triple_eq = any(_FILE_HEADER_RE.match(l.rstrip("\n\r")) for l in lines[:200])
+    has_p4_eq = any(_P4_HEADER_RE.match(l.rstrip("\n\r")) for l in lines[:200])
+    has_git_diff = any(_GIT_DIFF_RE.match(l.rstrip("\n\r")) for l in lines[:200])
+    has_plain_diff = any(_PLAIN_DIFF_RE.match(l.rstrip("\n\r")) for l in lines[:200])
+    has_unified = any(_UNIFIED_MINUS_RE.match(l.rstrip("\n\r")) for l in lines[:200])
+
+    # Try parsers in order of specificity
+    if has_triple_eq:
+        entries = _parse_triple_eq(lines)
+        if entries:
+            return entries
+
+    if has_p4_eq:
+        entries = _parse_p4_header(lines)
+        if entries:
+            return entries
+
+    if has_git_diff or has_plain_diff or has_unified:
+        entries = _parse_unified_headers(lines)
+        if entries:
+            return entries
+
+    # Fallback: try all parsers
+    for parser_fn in (_parse_triple_eq, _parse_p4_header, _parse_unified_headers):
+        entries = parser_fn(lines)
+        if entries:
+            return entries
+
+    return []
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -402,11 +581,20 @@ class CodebaseBatchPatchAgent:
 
         entries = parse_multi_file_patch(patch_text)
         if not entries:
+            # Show first few lines to help debug
+            preview = patch_text[:500].splitlines()[:5]
             self.logger.warning("No file entries found in patch file.")
-            self.logger.warning("    Expected format: === <server_path> — <local_path>")
+            self.logger.warning("    Supported header formats:")
+            self.logger.warning("      === <server_path> — <local_path>")
+            self.logger.warning("      ==== <depot_path>#rev - <local_path> ====")
+            self.logger.warning("      diff --git a/<path> b/<path>")
+            self.logger.warning("      --- a/<path> / +++ b/<path>")
+            self.logger.warning("    First lines of patch file:")
+            for pl in preview:
+                self.logger.warning(f"      | {pl}")
             return {"status": "warning", "message": "No file entries found"}
 
-        self.logger.info(f"Parsing patch file... {len(entries)} file(s) found.")
+        self.logger.info(f"Parsed patch file: {len(entries)} file(s) found.")
 
         # Create output directory
         if not self.dry_run:

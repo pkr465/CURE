@@ -78,7 +78,7 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 ├── agents/
 │   ├── codebase_static_agent.py        # Unified 7-phase static analyzer
 │   ├── codebase_llm_agent.py           # LLM-exclusive per-file code reviewer
-│   ├── batch_patch_agent.py             # Batch multi-file patch application (=== header format)
+│   ├── codebase_batch_patch_agent.py    # Batch multi-file patch application (=== header format)
 │   ├── codebase_fixer_agent.py         # Agentic code repair agent (source-aware, audit trail)
 │   ├── codebase_patch_agent.py         # Patch analysis agent (diff-based issue detection)
 │   ├── codebase_analysis_chat_agent.py # Interactive chat analysis agent
@@ -493,8 +493,9 @@ Create a file (e.g., `agents/constraints/my_driver.c_constraints.md`) using this
 | Flag                                  | Description                                                                                              |
 | :------------------------------------ | :------------------------------------------------------------------------------------------------------- |
 | `--excel-file PATH`                   | Path to the reviewed Excel file (default: `out/detailed_code_review.xlsx`)                               |
+| `--batch-patch PATCH_FILE`            | Run batch-patch mode: apply a multi-file patch (=== header format) instead of the fixer                  |
 | `--codebase-path PATH`                | Root directory of the source code                                                                        |
-| `--out-dir DIR`                       | Directory for backups/intermediate files                                                                 |
+| `--out-dir DIR`                       | Directory for output/patched files                                                                       |
 | `--fix-source {all,llm,static,patch}` | Process only issues from: all, llm (Analysis sheet), static (static_* sheets), or patch (patch_* sheets) |
 | `--llm-model MODEL`                   | LLM model in `provider::model` format                                                                    |
 | `--dry-run`                           | Simulate fixes without writing to disk                                                                   |
@@ -1240,7 +1241,7 @@ Both the LLM analysis prompt and patch review prompt include strict rules preven
 
 ## Batch Patch Agent
 
-The `BatchPatchAgent` (`agents/batch_patch_agent.py`) applies multi-file patches to a local codebase, producing patched copies in `out/patched_files/` with the codebase's folder structure preserved. It is designed for Perforce/depot-style patch files that contain diffs for many files in a single file.
+The `CodebaseBatchPatchAgent` (`agents/codebase_batch_patch_agent.py`) applies multi-file patches to a local codebase, producing patched copies in `out/patched_files/` with the codebase's folder structure preserved. It is designed for Perforce/depot-style patch files that contain diffs for many files in a single file. It can be invoked standalone or via `fixer_workflow.py --batch-patch`.
 
 ### Patch File Format
 
@@ -1267,14 +1268,15 @@ Each section has a header with the server (depot) path and local path separated 
 ### Usage
 
 ```bash
-# Reads codebase_path from global_config.yaml
-python agents/batch_patch_agent.py --patch-file t.patch
+# Via fixer_workflow.py (recommended — resolves config automatically)
+python fixer_workflow.py --batch-patch t.patch
+python fixer_workflow.py --batch-patch t.patch --codebase-path /path/to/codebase
+python fixer_workflow.py --batch-patch t.patch --dry-run
 
-# Explicit codebase path
-python agents/batch_patch_agent.py --patch-file t.patch --codebase-path /path/to/codebase
-
-# Dry run (show plan without writing files)
-python agents/batch_patch_agent.py --patch-file t.patch --dry-run
+# Standalone
+python agents/codebase_batch_patch_agent.py --patch-file t.patch
+python agents/codebase_batch_patch_agent.py --patch-file t.patch --codebase-path /path/to/codebase
+python agents/codebase_batch_patch_agent.py --patch-file t.patch --dry-run
 ```
 
 ### CLI Options

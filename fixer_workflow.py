@@ -20,8 +20,10 @@ class HumanInTheLoopWorkflow:
     """
     Orchestrator for the Automated Codebase Repair Workflow.
 
-    Bridge between:
-    1. Human Review (Excel) -> 2. Parsing Logic -> 3. Execution Agent
+    Supports two modes:
+
+    1. **Fixer mode** (default): Human Review (Excel) → Parsing Logic → CodebaseFixerAgent
+    2. **Batch-patch mode** (``--batch-patch``): Multi-file patch → CodebaseBatchPatchAgent
     """
 
     def __init__(self, args):
@@ -29,10 +31,13 @@ class HumanInTheLoopWorkflow:
         Initialize the workflow with parsed CLI arguments.
         """
         self.args = args
-        self.excel_path = Path(args.excel_file).resolve()
         self.workspace_dir = Path(args.out_dir).resolve()
 
-        # Define artifacts paths
+        # Batch-patch mode flag
+        self.batch_patch_file = getattr(args, "batch_patch", None)
+
+        # Excel-related paths (only used in fixer mode)
+        self.excel_path = Path(args.excel_file).resolve() if not self.batch_patch_file else None
         self.directives_jsonl = self.workspace_dir / "agent_directives.jsonl"
         self.final_report = self.workspace_dir / "final_execution_audit.xlsx"
 
@@ -70,10 +75,66 @@ class HumanInTheLoopWorkflow:
 
     def execute(self):
         """
-        Execute the two-step workflow:
-        1. Parse Excel review file into agent directives
-        2. Run the CodebaseFixerAgent on directives
+        Execute the workflow. Dispatches to batch-patch mode or the
+        default two-step fixer mode depending on CLI arguments.
         """
+        if self.batch_patch_file:
+            return self._execute_batch_patch()
+        return self._execute_fixer()
+
+    # ─── Batch-patch mode ─────────────────────────────────────────────
+
+    def _execute_batch_patch(self):
+        """Apply a multi-file patch using CodebaseBatchPatchAgent."""
+        print("=" * 60)
+        print(" Batch Patch Workflow")
+        print("=" * 60)
+
+        patch_path = Path(self.batch_patch_file).resolve()
+
+        # Validate inputs
+        if not patch_path.exists():
+            print(f"[!] Error: Patch file does not exist: {patch_path}")
+            return
+        if not self.codebase_root.exists():
+            print(f"[!] Error: Codebase path does not exist: {self.codebase_root}")
+            return
+
+        try:
+            from agents.codebase_batch_patch_agent import CodebaseBatchPatchAgent
+        except ImportError as e:
+            print(f"[!] Error: Could not import CodebaseBatchPatchAgent: {e}")
+            return
+
+        try:
+            agent = CodebaseBatchPatchAgent(
+                patch_file=str(patch_path),
+                codebase_path=str(self.codebase_root),
+                output_dir=str(self.workspace_dir),
+                config=self.global_config,
+                dry_run=self.args.dry_run,
+                verbose=self.args.verbose,
+            )
+            result = agent.run()
+
+            if result and self.args.verbose:
+                print(f"    [OK] Batch patch complete. Result: {result}")
+
+        except Exception as e:
+            print(f"    [!] Exception during batch patch: {e}")
+            if self.args.verbose:
+                import traceback
+                traceback.print_exc()
+
+        print("\n" + "=" * 60)
+        print(" BATCH PATCH COMPLETE")
+        print(f" Output: {self.workspace_dir / 'patched_files'}")
+        print("=" * 60)
+
+    # ─── Fixer mode (default) ─────────────────────────────────────────
+
+    def _execute_fixer(self):
+        """Two-step workflow: parse Excel → run CodebaseFixerAgent."""
         print("="*60)
         print(" Automated Codebase Repair Workflow")
         print("="*60)
@@ -198,7 +259,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--excel-file",
         default="out/detailed_code_review.xlsx",
-        help="Path to the reviewed Excel file"
+        help="Path to the reviewed Excel file (fixer mode)"
+    )
+    parser.add_argument(
+        "--batch-patch",
+        default=None,
+        metavar="PATCH_FILE",
+        help="Path to a multi-file patch file (=== header format). "
+             "When provided, runs the Batch Patch Agent instead of the fixer."
     )
     parser.add_argument(
         "--codebase-path",
@@ -208,7 +276,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--out-dir",
         default="out",
-        help="Directory for backups/intermediate files"
+        help="Directory for output/patched files"
     )
     parser.add_argument(
         "--config-file",

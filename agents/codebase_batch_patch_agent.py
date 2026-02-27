@@ -25,13 +25,16 @@ Patch file format (normal diff with ``===`` headers)::
 Usage::
 
     # Reads codebase_path from global_config.yaml
-    python agents/batch_patch_agent.py --patch-file t.patch
+    python agents/codebase_batch_patch_agent.py --patch-file t.patch
 
     # Explicit codebase path
-    python agents/batch_patch_agent.py --patch-file t.patch --codebase-path /path/to/codebase
+    python agents/codebase_batch_patch_agent.py --patch-file t.patch --codebase-path /path/to/codebase
 
     # Dry run (show plan without writing files)
-    python agents/batch_patch_agent.py --patch-file t.patch --dry-run
+    python agents/codebase_batch_patch_agent.py --patch-file t.patch --dry-run
+
+    # Via fixer_workflow.py
+    python fixer_workflow.py --batch-patch t.patch --codebase-path /path/to/codebase
 """
 
 from __future__ import annotations
@@ -50,7 +53,7 @@ from typing import List, Optional, Tuple
 # Logging
 # ──────────────────────────────────────────────────────────────────────────────
 
-logger = logging.getLogger("batch_patch_agent")
+logger = logging.getLogger("codebase_batch_patch_agent")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -334,7 +337,7 @@ def parse_multi_file_patch(patch_text: str) -> List[FileEntry]:
 # Batch Patch Agent
 # ──────────────────────────────────────────────────────────────────────────────
 
-class BatchPatchAgent:
+class CodebaseBatchPatchAgent:
     """Parse a multi-file patch and apply it to a local codebase.
 
     Copies each referenced file to ``out/patched_files/<rel_path>``
@@ -347,6 +350,7 @@ class BatchPatchAgent:
         patch_file: str,
         codebase_path: str,
         output_dir: str = "./out",
+        config: Optional[object] = None,
         dry_run: bool = False,
         verbose: bool = False,
     ) -> None:
@@ -354,8 +358,10 @@ class BatchPatchAgent:
         self.codebase_path = Path(codebase_path).resolve()
         self.output_dir = Path(output_dir).resolve()
         self.patched_dir = self.output_dir / "patched_files"
+        self.config = config
         self.dry_run = dry_run
         self.verbose = verbose
+        self.logger = logging.getLogger("codebase_batch_patch_agent")
 
         # Stats
         self.patched_count = 0
@@ -370,23 +376,22 @@ class BatchPatchAgent:
         Returns:
             Summary dict with counts and file list.
         """
-        print("=" * 60)
-        print(" Batch Patch Agent")
-        print("=" * 60)
-        print(f"  Patch file: {self.patch_file}")
-        print(f"  Codebase:   {self.codebase_path}")
-        print(f"  Output:     {self.patched_dir}")
+        self.logger.info("=" * 60)
+        self.logger.info(" Batch Patch Agent")
+        self.logger.info("=" * 60)
+        self.logger.info(f"  Patch file: {self.patch_file}")
+        self.logger.info(f"  Codebase:   {self.codebase_path}")
+        self.logger.info(f"  Output:     {self.patched_dir}")
         if self.dry_run:
-            print("  Mode:       DRY RUN")
-        print()
+            self.logger.info("  Mode:       DRY RUN")
 
         # Validate inputs
         if not self.patch_file.exists():
-            print(f"[!] Patch file not found: {self.patch_file}")
+            self.logger.error(f"Patch file not found: {self.patch_file}")
             return {"status": "error", "message": "Patch file not found"}
 
         if not self.codebase_path.exists():
-            print(f"[!] Codebase path not found: {self.codebase_path}")
+            self.logger.error(f"Codebase path not found: {self.codebase_path}")
             return {"status": "error", "message": "Codebase path not found"}
 
         # Read and parse multi-file patch
@@ -397,11 +402,11 @@ class BatchPatchAgent:
 
         entries = parse_multi_file_patch(patch_text)
         if not entries:
-            print("[!] No file entries found in patch file.")
-            print("    Expected format: === <server_path> — <local_path>")
+            self.logger.warning("No file entries found in patch file.")
+            self.logger.warning("    Expected format: === <server_path> — <local_path>")
             return {"status": "warning", "message": "No file entries found"}
 
-        print(f"Parsing patch file... {len(entries)} file(s) found.\n")
+        self.logger.info(f"Parsing patch file... {len(entries)} file(s) found.")
 
         # Create output directory
         if not self.dry_run:
@@ -418,11 +423,12 @@ class BatchPatchAgent:
         self._cleanup_ccls_artifacts()
 
         # Summary
-        print()
-        print(f"Summary: {self.patched_count} patched, "
-              f"{self.skipped_count} skipped, {self.failed_count} failed")
+        self.logger.info(
+            f"Summary: {self.patched_count} patched, "
+            f"{self.skipped_count} skipped, {self.failed_count} failed"
+        )
         if patched_files:
-            print(f"Output directory: {self.patched_dir}/")
+            self.logger.info(f"Output directory: {self.patched_dir}/")
 
         return {
             "status": "completed",
@@ -449,13 +455,14 @@ class BatchPatchAgent:
             )
             if stats["files_removed"] > 0:
                 mb = stats["bytes_freed"] / (1024 * 1024)
-                print(f"CCLS cleanup: {stats['files_removed']} temp files removed "
-                      f"({mb:.1f} MB freed)")
+                self.logger.info(
+                    f"CCLS cleanup: {stats['files_removed']} temp files removed "
+                    f"({mb:.1f} MB freed)"
+                )
         except ImportError:
             pass  # cleanup module not available
         except Exception as e:
-            if self.verbose:
-                print(f"CCLS cleanup note: {e}")
+            self.logger.debug(f"CCLS cleanup: {e}")
 
     # ─── Per-file processing ──────────────────────────────────────────
 
@@ -469,16 +476,16 @@ class BatchPatchAgent:
         display_name = source_path.name if source_path else Path(entry.local_path).name
 
         if not source_path or not source_path.exists():
-            print(f"[{idx}/{total}] {display_name} — File not found — SKIPPED")
+            self.logger.warning(f"[{idx}/{total}] {display_name} — File not found — SKIPPED")
             if self.verbose and entry.local_path:
-                print(f"         Tried: {entry.local_path}")
+                self.logger.debug(f"         Tried: {entry.local_path}")
             self.skipped_count += 1
             return None
 
         # Parse the diff
         fmt, hunks = parse_diff(entry.diff_body)
         if not hunks:
-            print(f"[{idx}/{total}] {display_name} — No hunks parsed — SKIPPED")
+            self.logger.warning(f"[{idx}/{total}] {display_name} — No hunks parsed — SKIPPED")
             self.skipped_count += 1
             return None
 
@@ -486,7 +493,7 @@ class BatchPatchAgent:
         try:
             original_content = source_path.read_text(encoding="utf-8", errors="replace")
         except Exception as exc:
-            print(f"[{idx}/{total}] {display_name} — Read error: {exc} — FAILED")
+            self.logger.error(f"[{idx}/{total}] {display_name} — Read error: {exc} — FAILED")
             self.failed_count += 1
             return None
 
@@ -494,7 +501,7 @@ class BatchPatchAgent:
         try:
             patched_content = apply_patch(original_content, hunks)
         except Exception as exc:
-            print(f"[{idx}/{total}] {display_name} — Patch error: {exc} — FAILED")
+            self.logger.error(f"[{idx}/{total}] {display_name} — Patch error: {exc} — FAILED")
             self.failed_count += 1
             return None
 
@@ -503,9 +510,9 @@ class BatchPatchAgent:
         out_path = self.patched_dir / rel_path
 
         if self.dry_run:
-            print(f"[{idx}/{total}] {display_name} — {len(hunks)} hunk(s) — WOULD PATCH")
+            self.logger.info(f"[{idx}/{total}] {display_name} — {len(hunks)} hunk(s) — WOULD PATCH")
             if self.verbose:
-                print(f"         {source_path} -> {out_path}")
+                self.logger.debug(f"         {source_path} -> {out_path}")
             self.patched_count += 1
             return str(out_path)
 
@@ -514,11 +521,11 @@ class BatchPatchAgent:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             out_path.write_text(patched_content, encoding="utf-8")
         except Exception as exc:
-            print(f"[{idx}/{total}] {display_name} — Write error: {exc} — FAILED")
+            self.logger.error(f"[{idx}/{total}] {display_name} — Write error: {exc} — FAILED")
             self.failed_count += 1
             return None
 
-        print(f"[{idx}/{total}] {display_name} — {len(hunks)} hunk(s) — PATCHED")
+        self.logger.info(f"[{idx}/{total}] {display_name} — {len(hunks)} hunk(s) — PATCHED")
         self.patched_count += 1
         return str(out_path)
 
@@ -567,6 +574,10 @@ class BatchPatchAgent:
         except ValueError:
             # Source not under codebase_path — use just the filename
             return Path(source_path.name)
+
+
+# Backward-compatible alias
+BatchPatchAgent = CodebaseBatchPatchAgent
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -642,7 +653,7 @@ def main():
         print("    Provide --codebase-path or set paths.code_base_path in config.")
         sys.exit(1)
 
-    agent = BatchPatchAgent(
+    agent = CodebaseBatchPatchAgent(
         patch_file=args.patch_file,
         codebase_path=codebase_path,
         output_dir=args.out_dir,

@@ -20,10 +20,11 @@ class HumanInTheLoopWorkflow:
     """
     Orchestrator for the Automated Codebase Repair Workflow.
 
-    Supports two modes:
+    Supports three modes:
 
     1. **Fixer mode** (default): Human Review (Excel) → Parsing Logic → CodebaseFixerAgent
     2. **Batch-patch mode** (``--batch-patch``): Multi-file patch → CodebaseBatchPatchAgent
+    3. **Patch-analysis mode** (``--patch-file`` + ``--patch-target``): Single-file patch analysis → CodebasePatchAgent
     """
 
     def __init__(self, args):
@@ -33,11 +34,14 @@ class HumanInTheLoopWorkflow:
         self.args = args
         self.workspace_dir = Path(args.out_dir).resolve()
 
-        # Batch-patch mode flag
+        # Mode flags
         self.batch_patch_file = getattr(args, "batch_patch", None)
+        self.patch_file = getattr(args, "patch_file", None)
+        self.patch_target = getattr(args, "patch_target", None)
 
         # Excel-related paths (only used in fixer mode)
-        self.excel_path = Path(args.excel_file).resolve() if not self.batch_patch_file else None
+        is_patch_mode = self.batch_patch_file or (self.patch_file and self.patch_target)
+        self.excel_path = Path(args.excel_file).resolve() if not is_patch_mode else None
         self.directives_jsonl = self.workspace_dir / "agent_directives.jsonl"
         self.final_report = self.workspace_dir / "final_execution_audit.xlsx"
 
@@ -57,6 +61,25 @@ class HumanInTheLoopWorkflow:
         # Ensure workspace exists
         os.makedirs(self.workspace_dir, exist_ok=True)
 
+    def _build_llm_tools(self):
+        """Resolve LLM model and build LLMTools instance.
+
+        Resolution order: ``--llm-model`` CLI arg → ``global_config.yaml``
+        ``llm.model`` → default LLMTools().
+        """
+        llm_model = getattr(self.args, "llm_model", None)
+        if not llm_model and self.global_config:
+            try:
+                llm_model = self.global_config.get("llm.model")
+            except Exception:
+                llm_model = None
+        try:
+            return LLMTools(model=llm_model) if llm_model else LLMTools()
+        except Exception as e:
+            if self.args.verbose:
+                print(f"    [WARNING] LLMTools init failed: {e}")
+            return None
+
     def _initialize_global_config(self):
         """
         Load GlobalConfig from default or custom config file.
@@ -75,12 +98,97 @@ class HumanInTheLoopWorkflow:
 
     def execute(self):
         """
-        Execute the workflow. Dispatches to batch-patch mode or the
-        default two-step fixer mode depending on CLI arguments.
+        Execute the workflow. Dispatches to the appropriate mode based
+        on CLI arguments:
+
+        - ``--patch-file`` + ``--patch-target`` → patch analysis
+        - ``--batch-patch``                     → batch patch
+        - (default)                             → fixer (Excel → agent)
         """
+        if self.patch_file and self.patch_target:
+            return self._execute_patch_analysis()
         if self.batch_patch_file:
             return self._execute_batch_patch()
         return self._execute_fixer()
+
+    # ─── Patch-analysis mode ─────────────────────────────────────────
+
+    def _execute_patch_analysis(self):
+        """Analyse a single-file patch using CodebasePatchAgent.
+
+        Requires ``--patch-file`` (the diff) and ``--patch-target`` (the
+        original source file).  The agent runs LLM + optional static
+        analysis on both original and patched versions, then diffs findings
+        to identify issues *introduced* by the patch.
+        """
+        print("=" * 60)
+        print(" Patch Analysis Workflow")
+        print("=" * 60)
+
+        patch_path = Path(self.patch_file).resolve()
+        target_path = Path(self.patch_target).resolve()
+
+        # Validate inputs
+        if not patch_path.exists():
+            print(f"[!] Error: Patch file does not exist: {patch_path}")
+            return
+        if not target_path.exists():
+            print(f"[!] Error: Target source file does not exist: {target_path}")
+            return
+
+        print(f"    Target file: {target_path}")
+        print(f"    Patch file:  {patch_path}")
+
+        try:
+            from agents.codebase_patch_agent import CodebasePatchAgent
+        except ImportError as e:
+            print(f"[!] Error: Could not import CodebasePatchAgent: {e}")
+            return
+
+        # Resolve LLM tools
+        llm_tools = self._build_llm_tools()
+
+        # Resolve codebase path for header/context resolution
+        patch_codebase = getattr(self.args, "patch_codebase_path", None)
+        if not patch_codebase:
+            # Fall back to --codebase-path, then parent of target file
+            if self.codebase_root.exists() and str(self.codebase_root) != str(Path("codebase").resolve()):
+                patch_codebase = str(self.codebase_root)
+            else:
+                patch_codebase = str(target_path.parent)
+
+        enable_adapters = getattr(self.args, "enable_adapters", False)
+
+        try:
+            agent = CodebasePatchAgent(
+                file_path=str(target_path),
+                patch_file=str(patch_path),
+                output_dir=str(self.workspace_dir),
+                config=self.global_config,
+                llm_tools=llm_tools,
+                enable_adapters=enable_adapters,
+                verbose=self.args.verbose,
+                codebase_path=patch_codebase,
+            )
+
+            excel_path = str(self.workspace_dir / "detailed_code_review.xlsx")
+            result = agent.run_analysis(excel_path=excel_path)
+
+            print(f"\n    Patch Analysis Complete!")
+            print(f"    Original issues: {result.get('original_issue_count', 0)}")
+            print(f"    Patched issues:  {result.get('patched_issue_count', 0)}")
+            print(f"    NEW issues:      {result.get('new_issue_count', 0)}")
+            print(f"    Excel output:    {result.get('excel_path', 'N/A')}")
+
+        except Exception as e:
+            print(f"    [!] Patch Analysis failed: {e}")
+            if self.args.verbose:
+                import traceback
+                traceback.print_exc()
+
+        print("\n" + "=" * 60)
+        print(" PATCH ANALYSIS COMPLETE")
+        print("=" * 60)
 
     # ─── Batch-patch mode ─────────────────────────────────────────────
 
@@ -267,6 +375,30 @@ if __name__ == "__main__":
         metavar="PATCH_FILE",
         help="Path to a multi-file patch file (=== header format). "
              "When provided, runs the Batch Patch Agent instead of the fixer."
+    )
+    parser.add_argument(
+        "--patch-file",
+        default=None,
+        help="Path to a .patch/.diff file for single-file patch analysis "
+             "(unified or normal diff format). Requires --patch-target."
+    )
+    parser.add_argument(
+        "--patch-target",
+        default=None,
+        help="Path to the original source file being patched "
+             "(used with --patch-file)"
+    )
+    parser.add_argument(
+        "--patch-codebase-path",
+        default=None,
+        help="Root of the codebase for header/context resolution during "
+             "patch analysis (defaults to --codebase-path or parent of --patch-target)"
+    )
+    parser.add_argument(
+        "--enable-adapters",
+        action="store_true",
+        help="Enable deep static analysis adapters (Lizard, Flawfinder, CCLS) "
+             "for patch analysis mode"
     )
     parser.add_argument(
         "--codebase-path",

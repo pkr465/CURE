@@ -494,6 +494,10 @@ Create a file (e.g., `agents/constraints/my_driver.c_constraints.md`) using this
 | :------------------------------------ | :------------------------------------------------------------------------------------------------------- |
 | `--excel-file PATH`                   | Path to the reviewed Excel file (default: `out/detailed_code_review.xlsx`)                               |
 | `--batch-patch PATCH_FILE`            | Run batch-patch mode: apply a multi-file patch (=== header format) instead of the fixer                  |
+| `--patch-file PATH`                   | Path to a `.patch`/`.diff` file for single-file patch analysis (requires `--patch-target`)               |
+| `--patch-target PATH`                 | Path to the original source file being patched (used with `--patch-file`)                                |
+| `--patch-codebase-path PATH`          | Root of the codebase for header/context resolution during patch analysis                                 |
+| `--enable-adapters`                   | Enable deep static analysis adapters (Lizard, Flawfinder, CCLS) for patch analysis                      |
 | `--codebase-path PATH`                | Root directory of the source code                                                                        |
 | `--out-dir DIR`                       | Directory for output/patched files                                                                       |
 | `--fix-source {all,llm,static,patch}` | Process only issues from: all, llm (Analysis sheet), static (static_* sheets), or patch (patch_* sheets) |
@@ -587,6 +591,31 @@ python fixer_workflow.py --step parse --excel detailed_code_review.xlsx
 
 # Run the fixer agent only
 python fixer_workflow.py --step fix --codebase-path /path/to/project
+```
+
+### Patch Analysis (single-file)
+
+```bash
+# Analyse a patch against the original file
+python fixer_workflow.py --patch-file fix.patch --patch-target src/module.c
+
+# With codebase context for header resolution
+python fixer_workflow.py --patch-file fix.patch --patch-target src/module.c \
+  --codebase-path /path/to/project
+
+# With deep static adapters
+python fixer_workflow.py --patch-file fix.patch --patch-target src/module.c \
+  --enable-adapters
+```
+
+### Batch Patch (multi-file)
+
+```bash
+# Apply a multi-file patch (=== header format)
+python fixer_workflow.py --batch-patch t.patch
+
+# With explicit codebase path
+python fixer_workflow.py --batch-patch t.patch --codebase-path /path/to/project
 ```
 
 ### Feedback & Constraints Columns

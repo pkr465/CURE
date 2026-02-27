@@ -30,7 +30,6 @@ class HumanInTheLoopWorkflow:
         """
         self.args = args
         self.excel_path = Path(args.excel_file).resolve()
-        self.codebase_root = Path(args.codebase_path).resolve()
         self.workspace_dir = Path(args.out_dir).resolve()
 
         # Define artifacts paths
@@ -39,6 +38,16 @@ class HumanInTheLoopWorkflow:
 
         # Initialize GlobalConfig
         self.global_config = self._initialize_global_config()
+
+        # Resolve codebase_root: CLI arg → GlobalConfig → default
+        # Match the same resolution order as main.py
+        cli_codebase = args.codebase_path
+        if cli_codebase == "codebase" and self.global_config:
+            # CLI was left at default — try GlobalConfig
+            config_path = self.global_config.get_path("paths.code_base_path")
+            if config_path:
+                cli_codebase = config_path
+        self.codebase_root = Path(cli_codebase).resolve()
 
         # Ensure workspace exists
         os.makedirs(self.workspace_dir, exist_ok=True)

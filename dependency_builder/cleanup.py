@@ -4,11 +4,13 @@ dependency_builder.cleanup
 
 Post-run cleanup of CCLS artifacts produced during ``--use-ccls`` analysis.
 
-Artifacts removed:
-    1. ``.ccls-cache/``  — CCLS index cache directory (can be hundreds of MB)
-    2. ``.ccls``         — CCLS config file written to the project root
-    3. ``.cache_metadata.json`` — dependency handler cache metadata
-    4. Individual dependency-artifact JSON files tracked by the cache metadata
+Artifacts cleaned (by default only temporary JSON files):
+    1. ``.cache_metadata.json`` — dependency handler cache metadata
+    2. Individual dependency-artifact JSON files tracked by the cache metadata
+
+Preserved by default (expensive to regenerate):
+    3. ``.ccls-cache/``  — CCLS index cache directory (set remove_ccls_cache=True to delete)
+    4. ``.ccls``         — CCLS config file in project root (set remove_ccls_config=True to delete)
 
 Usage:
     from dependency_builder.cleanup import cleanup_ccls_artifacts
@@ -31,24 +33,33 @@ def cleanup_ccls_artifacts(
     output_dir: str,
     project_root: Optional[str] = None,
     cache_metadata_filename: str = ".cache_metadata.json",
-    remove_ccls_cache: bool = True,
+    remove_ccls_cache: bool = False,
     remove_dep_artifacts: bool = True,
-    remove_ccls_config: bool = True,
+    remove_ccls_config: bool = False,
     dry_run: bool = False,
 ) -> dict:
     """
-    Remove CCLS-generated artifacts from the output directory.
+    Remove temporary CCLS-generated artifacts from the output directory.
+
+    By default only temporary dependency-artifact JSON files (tracked in
+    cache metadata) are removed.  The ``.ccls-cache/`` directory and the
+    ``.ccls`` project config are **preserved** by default because they are
+    expensive to regenerate and are needed for subsequent runs.
 
     Args:
         output_dir:              Path to the output directory (e.g. ``./out``).
-        project_root:            Path to the analysed project root. If provided,
-                                 the ``.ccls`` config file at the root is removed.
+        project_root:            Path to the analysed project root. If provided
+                                 and *remove_ccls_config* is True, the ``.ccls``
+                                 config file at the root is removed.
         cache_metadata_filename: Name of the cache metadata file
                                  (default: ``.cache_metadata.json``).
         remove_ccls_cache:       Remove the ``.ccls-cache/`` directory.
+                                 **Default False** — the cache is expensive to
+                                 rebuild and is reused across runs.
         remove_dep_artifacts:    Remove individual dependency-artifact JSON files
                                  tracked in the cache metadata.
         remove_ccls_config:      Remove the ``.ccls`` file from project root.
+                                 **Default False** — preserves project config.
         dry_run:                 If True, log what *would* be removed but don't
                                  actually delete anything.
 

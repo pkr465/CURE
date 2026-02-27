@@ -1116,20 +1116,24 @@ class CodebaseFixerAgent:
         """
         warnings: List[str] = []
 
-        # --- CHECK 1: BRACE BALANCE (hard failure) ---
+        # --- CHECK 1: BRACE BALANCE (hard failure only on mismatch) ---
         orig_open, orig_close = self._count_braces_outside_strings(original)
         fixed_open, fixed_close = self._count_braces_outside_strings(fixed)
 
+        # Hard failure: fixed code has unbalanced braces (open != close)
         if fixed_open != fixed_close:
             return False, (
                 f"Brace mismatch in fixed code: {fixed_open} '{{' vs "
                 f"{fixed_close} '}}'. Reverting to original."
             )
 
+        # Soft warning: brace count changed but is still balanced.
+        # This is EXPECTED when the LLM adds error-handling blocks,
+        # null checks, or other defensive code (e.g. if (...) { return; }).
         if orig_open == orig_close and fixed_open != orig_open:
-            return False, (
-                f"Brace count changed: original had {orig_open} pairs, "
-                f"fixed has {fixed_open}. Reverting to original."
+            warnings.append(
+                f"Brace pair count changed: original had {orig_open} pairs, "
+                f"fixed has {fixed_open} (likely added/removed code blocks)."
             )
 
         # --- CHECK 2: BLANK LINE PRESERVATION (soft warning) ---

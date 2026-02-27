@@ -517,11 +517,17 @@ def parse_multi_file_patch(patch_text: str) -> List[FileEntry]:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class CodebaseBatchPatchAgent:
-    """Parse a multi-file patch and apply it to a local codebase.
+    """Parse a multi-file patch, apply it, and **analyse** each file.
 
-    Copies each referenced file to ``out/patched_files/<rel_path>``
-    and writes the patched version there, preserving the codebase's
-    folder structure.
+    For every file in the patch the agent:
+
+    1. Resolves the source file in the codebase.
+    2. Writes the per-file diff to a temp file.
+    3. Invokes :class:`CodebasePatchAgent` to run the full analysis
+       pipeline (LLM review + optional static adapters) on both original
+       and patched versions.
+    4. Saves the patched copy to ``out/patched_files/<rel_path>``.
+    5. Merges findings into ``detailed_code_review.xlsx``.
     """
 
     def __init__(
@@ -530,31 +536,52 @@ class CodebaseBatchPatchAgent:
         codebase_path: str,
         output_dir: str = "./out",
         config: Optional[object] = None,
+        llm_tools: Optional[object] = None,
+        hitl_context: Optional[object] = None,
+        enable_adapters: bool = False,
         dry_run: bool = False,
         verbose: bool = False,
+        exclude_dirs: Optional[List[str]] = None,
+        exclude_globs: Optional[List[str]] = None,
+        custom_constraints: Optional[List[str]] = None,
     ) -> None:
         self.patch_file = Path(patch_file).resolve()
         self.codebase_path = Path(codebase_path).resolve()
         self.output_dir = Path(output_dir).resolve()
         self.patched_dir = self.output_dir / "patched_files"
         self.config = config
+        self.llm_tools = llm_tools
+        self.hitl_context = hitl_context
+        self.enable_adapters = enable_adapters
         self.dry_run = dry_run
         self.verbose = verbose
+        self.exclude_dirs = exclude_dirs or []
+        self.exclude_globs = exclude_globs or []
+        self.custom_constraints = custom_constraints or []
         self.logger = logging.getLogger("codebase_batch_patch_agent")
 
         # Stats
         self.patched_count = 0
         self.skipped_count = 0
         self.failed_count = 0
+        self.total_original_issues = 0
+        self.total_patched_issues = 0
+        self.total_new_issues = 0
 
     # ─── Public API ───────────────────────────────────────────────────
 
-    def run(self) -> dict:
-        """Execute the batch patching pipeline.
+    def run(self, excel_path: Optional[str] = None) -> dict:
+        """Execute the batch patching + analysis pipeline.
+
+        Args:
+            excel_path: Path to ``detailed_code_review.xlsx`` to update.
+                Each file's analysis results are appended as a new tab.
 
         Returns:
             Summary dict with counts and file list.
         """
+        self.excel_path = excel_path or str(self.output_dir / "detailed_code_review.xlsx")
+
         self.logger.info("=" * 60)
         self.logger.info(" Batch Patch Agent")
         self.logger.info("=" * 60)
@@ -612,11 +639,17 @@ class CodebaseBatchPatchAgent:
 
         # Summary
         self.logger.info(
-            f"Summary: {self.patched_count} patched, "
+            f"Summary: {self.patched_count} analysed, "
             f"{self.skipped_count} skipped, {self.failed_count} failed"
         )
+        self.logger.info(
+            f"Analysis: {self.total_original_issues} original issues, "
+            f"{self.total_patched_issues} patched issues, "
+            f"{self.total_new_issues} NEW issues introduced"
+        )
         if patched_files:
-            self.logger.info(f"Output directory: {self.patched_dir}/")
+            self.logger.info(f"Patched files: {self.patched_dir}/")
+        self.logger.info(f"Excel output:  {self.excel_path}")
 
         return {
             "status": "completed",
@@ -625,6 +658,10 @@ class CodebaseBatchPatchAgent:
             "failed": self.failed_count,
             "files": patched_files,
             "output_dir": str(self.patched_dir),
+            "excel_path": self.excel_path,
+            "original_issue_count": self.total_original_issues,
+            "patched_issue_count": self.total_patched_issues,
+            "new_issue_count": self.total_new_issues,
         }
 
     # ─── CCLS cleanup ─────────────────────────────────────────────────
@@ -657,7 +694,16 @@ class CodebaseBatchPatchAgent:
     def _process_entry(
         self, idx: int, total: int, entry: FileEntry
     ) -> Optional[str]:
-        """Process a single file entry. Returns the output path or None."""
+        """Process a single file entry: analyse via CodebasePatchAgent.
+
+        Writes the file's diff body to a temp file, then delegates to
+        :class:`CodebasePatchAgent` which handles patch application,
+        LLM analysis, static adapters, diff-based finding detection,
+        Excel reporting, and patched-file preservation.
+
+        Returns the patched output path or None.
+        """
+        import tempfile
 
         # Resolve the source file path
         source_path = self._resolve_source_path(entry)
@@ -670,52 +716,92 @@ class CodebaseBatchPatchAgent:
             self.skipped_count += 1
             return None
 
-        # Parse the diff
+        # Quick-check: can we parse any hunks from this entry's diff?
         fmt, hunks = parse_diff(entry.diff_body)
         if not hunks:
             self.logger.warning(f"[{idx}/{total}] {display_name} — No hunks parsed — SKIPPED")
             self.skipped_count += 1
             return None
 
-        # Read original
-        try:
-            original_content = source_path.read_text(encoding="utf-8", errors="replace")
-        except Exception as exc:
-            self.logger.error(f"[{idx}/{total}] {display_name} — Read error: {exc} — FAILED")
-            self.failed_count += 1
-            return None
-
-        # Apply patch
-        try:
-            patched_content = apply_patch(original_content, hunks)
-        except Exception as exc:
-            self.logger.error(f"[{idx}/{total}] {display_name} — Patch error: {exc} — FAILED")
-            self.failed_count += 1
-            return None
-
-        # Determine output path (preserve folder structure)
-        rel_path = self._get_relative_path(source_path)
-        out_path = self.patched_dir / rel_path
+        self.logger.info(f"[{idx}/{total}] {display_name} — {len(hunks)} hunk(s) — analysing...")
 
         if self.dry_run:
-            self.logger.info(f"[{idx}/{total}] {display_name} — {len(hunks)} hunk(s) — WOULD PATCH")
-            if self.verbose:
-                self.logger.debug(f"         {source_path} -> {out_path}")
+            rel_path = self._get_relative_path(source_path)
+            out_path = self.patched_dir / rel_path
+            self.logger.info(f"[{idx}/{total}] {display_name} — WOULD ANALYSE")
             self.patched_count += 1
             return str(out_path)
 
-        # Write patched file
+        # Write per-file diff to a temp file for CodebasePatchAgent
+        tmp_diff = None
         try:
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            out_path.write_text(patched_content, encoding="utf-8")
+            tmp_diff = Path(tempfile.mktemp(
+                prefix=f"cure_batch_{source_path.stem}_",
+                suffix=".diff",
+            ))
+            tmp_diff.write_text(entry.diff_body, encoding="utf-8")
+
+            # Import CodebasePatchAgent (lazy — avoids circular imports)
+            from agents.codebase_patch_agent import CodebasePatchAgent
+
+            agent = CodebasePatchAgent(
+                file_path=str(source_path),
+                patch_file=str(tmp_diff),
+                output_dir=str(self.output_dir),
+                config=self.config,
+                llm_tools=self.llm_tools,
+                hitl_context=self.hitl_context,
+                enable_adapters=self.enable_adapters,
+                verbose=self.verbose,
+                exclude_dirs=self.exclude_dirs,
+                exclude_globs=self.exclude_globs,
+                custom_constraints=self.custom_constraints,
+                codebase_path=str(self.codebase_path),
+            )
+
+            result = agent.run_analysis(excel_path=self.excel_path)
+
+            status = result.get("status", "error")
+            orig_cnt = result.get("original_issue_count", 0)
+            patched_cnt = result.get("patched_issue_count", 0)
+            new_cnt = result.get("new_issue_count", 0)
+
+            self.total_original_issues += orig_cnt
+            self.total_patched_issues += patched_cnt
+            self.total_new_issues += new_cnt
+
+            if status == "success":
+                self.patched_count += 1
+                patched_file = result.get("patched_file_path", "")
+                self.logger.info(
+                    f"[{idx}/{total}] {display_name} — "
+                    f"{new_cnt} new issue(s) — DONE"
+                )
+                return patched_file or str(self.patched_dir / self._get_relative_path(source_path))
+            else:
+                self.logger.warning(
+                    f"[{idx}/{total}] {display_name} — "
+                    f"analysis status: {status} — {result.get('message', '')}"
+                )
+                # Even if analysis had issues, the patched file may have been saved
+                patched_file = result.get("patched_file_path", "")
+                if patched_file:
+                    self.patched_count += 1
+                    return patched_file
+                self.failed_count += 1
+                return None
+
         except Exception as exc:
-            self.logger.error(f"[{idx}/{total}] {display_name} — Write error: {exc} — FAILED")
+            self.logger.error(f"[{idx}/{total}] {display_name} — Analysis error: {exc} — FAILED")
             self.failed_count += 1
             return None
-
-        self.logger.info(f"[{idx}/{total}] {display_name} — {len(hunks)} hunk(s) — PATCHED")
-        self.patched_count += 1
-        return str(out_path)
+        finally:
+            # Clean up temp diff file
+            if tmp_diff and tmp_diff.exists():
+                try:
+                    tmp_diff.unlink()
+                except OSError:
+                    pass
 
     # ─── Path resolution helpers ──────────────────────────────────────
 

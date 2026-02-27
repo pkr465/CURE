@@ -478,8 +478,9 @@ Create a file (e.g., `agents/constraints/my_driver.c_constraints.md`) using this
 | `--force-reanalysis`            | Force re-analysis ignoring cached results                                 |
 | `--memory-limit MB`             | Memory limit in MB (default: 3000)                                        |
 | `--enable-memory-monitoring`    | Enable real-time memory monitoring (default: on)                          |
-| `--patch-file PATH`             | Path to `.patch`/`.diff` file for patch analysis                          |
+| `--patch-file PATH`             | Path to `.patch`/`.diff` file for single-file patch analysis              |
 | `--patch-target PATH`           | Path to the original source file being patched                            |
+| `--batch-patch PATCH_FILE`      | Path to a multi-file patch for batch analysis (Perforce, Git, unified)    |
 | `--enable-hitl`                 | Enable Human-in-the-Loop RAG feedback system                              | `false`                  |
 | `--hitl-feedback-excel`         | Path to `detailed_code_review.xlsx` with human feedback                   | `None`                   |
 | `--hitl-constraints-dir`        | Directory to search for `*_constraints.md` files                          | `None`                   |
@@ -493,13 +494,15 @@ Create a file (e.g., `agents/constraints/my_driver.c_constraints.md`) using this
 | Flag                                  | Description                                                                                              |
 | :------------------------------------ | :------------------------------------------------------------------------------------------------------- |
 | `--excel-file PATH`                   | Path to the reviewed Excel file (default: `out/detailed_code_review.xlsx`)                               |
-| `--batch-patch PATCH_FILE`            | Run batch-patch mode: apply a multi-file patch (=== header format) instead of the fixer                  |
-| `--patch-file PATH`                   | Path to a `.patch`/`.diff` file for single-file patch analysis (requires `--patch-target`)               |
+| `--batch-patch PATCH_FILE`            | Run batch-patch mode: analyse multi-file patch → fix from findings                                       |
+| `--patch-file PATH`                   | Path to a `.patch`/`.diff` file for single-file patch workflow (requires `--patch-target`)               |
 | `--patch-target PATH`                 | Path to the original source file being patched (used with `--patch-file`)                                |
 | `--patch-codebase-path PATH`          | Root of the codebase for header/context resolution during patch analysis                                 |
 | `--enable-adapters`                   | Enable deep static analysis adapters (Lizard, Flawfinder, CCLS) for patch analysis                      |
 | `--codebase-path PATH`                | Root directory of the source code                                                                        |
 | `--out-dir DIR`                       | Directory for output/patched files                                                                       |
+| `--analyse-only`                      | Run only the analysis step (Step 1) without applying fixes                                               |
+| `--fix-only`                          | Skip analysis and run fixer from pre-existing Excel (use with `--excel-file`)                            |
 | `--fix-source {all,llm,static,patch}` | Process only issues from: all, llm (Analysis sheet), static (static_* sheets), or patch (patch_* sheets) |
 | `--llm-model MODEL`                   | LLM model in `provider::model` format                                                                    |
 | `--dry-run`                           | Simulate fixes without writing to disk                                                                   |
@@ -593,29 +596,59 @@ python fixer_workflow.py --step parse --excel detailed_code_review.xlsx
 python fixer_workflow.py --step fix --codebase-path /path/to/project
 ```
 
-### Patch Analysis (single-file)
+### Patch Workflow (single-file) — Analyse + Fix
+
+The patch workflow follows the same two-step pipeline as the fixer:
+
+1. **Step 1 — Analyse**: `CodebasePatchAgent` identifies issues introduced by the patch → writes to `patch_*` tabs in Excel.
+2. **Step 2 — Fix**: Parse findings + human feedback → `CodebaseFixerAgent` applies fixes, validates, and writes patched files.
 
 ```bash
-# Analyse a patch against the original file
-python fixer_workflow.py --patch-file fix.patch --patch-target src/module.c
-
-# With codebase context for header resolution
+# Full pipeline: analyse + fix (via fixer_workflow.py)
 python fixer_workflow.py --patch-file fix.patch --patch-target src/module.c \
+  --codebase-path /path/to/project
+
+# Analysis only (Step 1) — produces Excel for human review
+python fixer_workflow.py --patch-file fix.patch --patch-target src/module.c \
+  --codebase-path /path/to/project --analyse-only
+
+# Fix only (Step 2) — from a pre-reviewed Excel
+python fixer_workflow.py --patch-file fix.patch --patch-target src/module.c \
+  --fix-only --excel-file out/detailed_code_review.xlsx \
+  --codebase-path /path/to/project
+
+# Analysis only via main.py (no fix step)
+python main.py --patch-file fix.patch --patch-target src/module.c \
   --codebase-path /path/to/project
 
 # With deep static adapters
 python fixer_workflow.py --patch-file fix.patch --patch-target src/module.c \
-  --enable-adapters
+  --enable-adapters --codebase-path /path/to/project
 ```
 
-### Batch Patch (multi-file)
+### Batch Patch Workflow (multi-file) — Analyse + Fix
+
+Same two-step pipeline for multi-file patches (Perforce, Git, unified diff):
 
 ```bash
-# Apply a multi-file patch (=== header format)
-python fixer_workflow.py --batch-patch t.patch
-
-# With explicit codebase path
+# Full pipeline: analyse all files + fix
 python fixer_workflow.py --batch-patch t.patch --codebase-path /path/to/project
+
+# Analysis only (Step 1) — produces Excel for human review
+python fixer_workflow.py --batch-patch t.patch --codebase-path /path/to/project \
+  --analyse-only
+
+# Fix only (Step 2) — from a pre-reviewed Excel
+python fixer_workflow.py --batch-patch t.patch \
+  --fix-only --excel-file out/detailed_code_review.xlsx \
+  --codebase-path /path/to/project
+
+# Analysis only via main.py (no fix step)
+python main.py --batch-patch t.patch --codebase-path /path/to/project
+
+# With deep static adapters
+python fixer_workflow.py --batch-patch t.patch --codebase-path /path/to/project \
+  --enable-adapters
 ```
 
 ### Feedback & Constraints Columns
@@ -1270,66 +1303,50 @@ Both the LLM analysis prompt and patch review prompt include strict rules preven
 
 ## Batch Patch Agent
 
-The `CodebaseBatchPatchAgent` (`agents/codebase_batch_patch_agent.py`) applies multi-file patches to a local codebase, producing patched copies in `out/patched_files/` with the codebase's folder structure preserved. It is designed for Perforce/depot-style patch files that contain diffs for many files in a single file. It can be invoked standalone or via `fixer_workflow.py --batch-patch`.
+The `CodebaseBatchPatchAgent` (`agents/codebase_batch_patch_agent.py`) analyses multi-file patches against a local codebase. For each file in the patch, it delegates to `CodebasePatchAgent` to run full LLM + static analysis, reporting only issues **introduced** by the patch. Patched copies are saved to `out/patched_files/` with the codebase's folder structure preserved. Results are aggregated into a single Excel report.
 
-### Patch File Format
+### Supported Patch Formats
 
-The agent expects a multi-file patch with `===` headers separating each file's diff:
+The agent auto-detects five header formats (scans the first 200 lines):
 
-```
-=== //depot/path/to/file.h#641 — /local/mnt/workspace/path/to/file.h
-2524c2524,2525
-<     A_UINT32 txop_us);
----
->     A_UINT32 txop_us,
->     wal_pdev_t *pdev);
-=== //depot/path/to/cfg.c#805 — /local/mnt/workspace/path/to/cfg.c
-1589c1589,1591
-<     .opt.threshold = 5000,
----
->     .opt.threshold = 10000,
->     .opt.reg_domain = 6000,
->     .opt.max_limit = 12000,
-```
-
-Each section has a header with the server (depot) path and local path separated by ` — `, followed by normal or unified diff hunks.
+| Format | Header Pattern | Example |
+| :--- | :--- | :--- |
+| CURE custom | `=== server — local` | `=== //depot/file.h#1 — /local/file.h` |
+| Perforce p4 diff | `==== depot#rev - local ====` | `==== //depot/file.c#805 - /ws/file.c ====` |
+| Git diff | `diff --git a/path b/path` | `diff --git a/src/main.c b/src/main.c` |
+| Plain diff | `diff [-flags] path_a path_b` | `diff -u old/file.c new/file.c` |
+| Unified headers | `--- a/path` / `+++ b/path` | `--- a/module.c` / `+++ b/module.c` |
 
 ### Usage
 
 ```bash
-# Via fixer_workflow.py (recommended — resolves config automatically)
-python fixer_workflow.py --batch-patch t.patch
+# Full pipeline via fixer_workflow.py: analyse + fix
 python fixer_workflow.py --batch-patch t.patch --codebase-path /path/to/codebase
-python fixer_workflow.py --batch-patch t.patch --dry-run
 
-# Standalone
-python agents/codebase_batch_patch_agent.py --patch-file t.patch
-python agents/codebase_batch_patch_agent.py --patch-file t.patch --codebase-path /path/to/codebase
-python agents/codebase_batch_patch_agent.py --patch-file t.patch --dry-run
+# Analysis only (Step 1 — for human review before fixing)
+python fixer_workflow.py --batch-patch t.patch --codebase-path /path/to/codebase \
+  --analyse-only
+
+# Fix only (Step 2 — from a pre-reviewed Excel)
+python fixer_workflow.py --batch-patch t.patch --fix-only \
+  --excel-file out/detailed_code_review.xlsx --codebase-path /path/to/codebase
+
+# Analysis only via main.py (no fix step)
+python main.py --batch-patch t.patch --codebase-path /path/to/codebase
 ```
-
-### CLI Options
-
-| Flag | Description |
-| :--- | :--- |
-| `--patch-file FILE` | Path to the multi-file patch (required) |
-| `--codebase-path PATH` | Root directory of source code (defaults to `global_config.yaml` `paths.code_base_path`) |
-| `--out-dir DIR` | Output directory (default: `./out`) |
-| `--config-file PATH` | Path to custom `global_config.yaml` |
-| `--dry-run` | Show what would be patched without writing files |
-| `--verbose` | Enable verbose output |
 
 ### Output Structure
 
 ```
 out/
+  detailed_code_review.xlsx                             ← aggregated analysis
   patched_files/
-    components/rel/.../sched_algo/sched_algo.h        ← patched
-    components/rel/.../sched_algo/sched_algo_cfg.c     ← patched
-    components/rel/.../sched_algo/sched_algo_cfg.h     ← patched
+    components/rel/.../sched_algo/sched_algo.h          ← patched
+    components/rel/.../sched_algo/sched_algo_cfg.c      ← patched
+    components/rel/.../sched_algo/sched_algo_cfg.h      ← patched
 ```
 
-The agent supports both normal diff (`NUMcNUM`, `NUMaNUM`, `NUMdNUM`) and unified diff (`@@`) formats, auto-detecting per file section. Files that cannot be found in the codebase are skipped with a warning — the agent does not abort on missing files.
+Each file's diff is written to a temporary file and passed to `CodebasePatchAgent.run_analysis()`, which runs the full pipeline (LLM review, static adapters, hunk-scoped diffing). The batch agent aggregates total original, patched, and new issue counts across all files. Files that cannot be found in the codebase are skipped with a warning — the agent does not abort on missing files.
 
 ---
 

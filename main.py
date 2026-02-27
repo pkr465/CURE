@@ -107,6 +107,14 @@ except ImportError:
     PATCH_AGENT_AVAILABLE = False
     CodebasePatchAgent = None
 
+# Batch Patch Analysis Agent
+try:
+    from agents.codebase_batch_patch_agent import CodebaseBatchPatchAgent
+    BATCH_PATCH_AGENT_AVAILABLE = True
+except ImportError:
+    BATCH_PATCH_AGENT_AVAILABLE = False
+    CodebaseBatchPatchAgent = None
+
 # Deep static analysis adapters (Lizard, Flawfinder, CCLS)
 try:
     from agents.adapters import (
@@ -288,7 +296,7 @@ Examples:
         help="Specific file to analyze (relative to codebase path), used with --llm-exclusive",
     )
 
-    # Patch analysis mode
+    # Patch analysis mode (single file)
     parser.add_argument(
         "--patch-file",
         default=None,
@@ -304,6 +312,17 @@ Examples:
         default=None,
         help="Root of the codebase for header/context resolution during patch analysis "
              "(defaults to parent directory of --patch-target)",
+    )
+
+    # Batch patch analysis mode (multi-file)
+    parser.add_argument(
+        "--batch-patch",
+        default=None,
+        metavar="PATCH_FILE",
+        help="Path to a multi-file patch file for batch analysis. "
+             "Supports ===, ====, diff --git, and unified diff headers. "
+             "Analyses each file via CodebasePatchAgent and writes patched "
+             "files to out/patched_files/.",
     )
 
     parser.add_argument(
@@ -1412,6 +1431,77 @@ def main():
             except Exception as e:
                 console.print(f"[red]❌ Patch Analysis failed: {e}[/red]")
                 logger.error("Patch Analysis failed", exc_info=True)
+                sys.exit(1)
+
+        # ----------------------------------------------------
+        # BATCH PATCH ANALYSIS MODE (multi-file)
+        # ----------------------------------------------------
+        if opts.get("batch_patch"):
+            if not BATCH_PATCH_AGENT_AVAILABLE:
+                console.print("[red]❌ CodebaseBatchPatchAgent not available. Check agents/codebase_batch_patch_agent.py[/red]")
+                sys.exit(1)
+
+            console.print(f"[bold blue]🔍 Starting Batch Patch Analysis[/bold blue]")
+            console.print(f"[blue]📋 Patch file:  {opts['batch_patch']}[/blue]")
+            console.print(f"[blue]📂 Codebase:    {opts.get('codebase_path', 'N/A')}[/blue]")
+
+            try:
+                # Build LLM tools
+                llm_model = opts.get("llm_model") or (global_config.get("llm.model") if global_config else None)
+                llm_tools = None
+                if LLM_TOOLS_AVAILABLE:
+                    try:
+                        llm_tools = LLMTools(model=llm_model) if llm_model else LLMTools()
+                    except Exception as llm_err:
+                        console.print(f"[yellow]Warning: LLMTools init failed: {llm_err}[/yellow]")
+
+                # HITL context
+                hitl_context = None
+                if HITL_AVAILABLE and opts.get("enable_hitl"):
+                    try:
+                        hitl_config = HITLConfig(
+                            store_db_path=Path(opts.get("hitl_store_path", "./out/hitl/feedback.db")),
+                        )
+                        hitl_context = HITLContext(
+                            config=hitl_config,
+                            llm_tools=llm_tools,
+                            feedback_excel_path=opts.get("hitl_feedback_excel"),
+                            constraints_dir=opts.get("hitl_constraints_dir"),
+                        )
+                        console.print("[green]✓ HITL context initialised[/green]")
+                    except Exception as exc:
+                        console.print(f"[yellow]⚠ HITL init failed: {exc}[/yellow]")
+
+                agent = CodebaseBatchPatchAgent(
+                    patch_file=opts["batch_patch"],
+                    codebase_path=opts.get("codebase_path", "."),
+                    output_dir=opts.get("out_dir", "./out"),
+                    config=global_config,
+                    llm_tools=llm_tools,
+                    hitl_context=hitl_context,
+                    enable_adapters=opts.get("enable_adapters", False),
+                    verbose=opts.get("verbose", False),
+                    exclude_dirs=opts.get("exclude_dirs", []),
+                    exclude_globs=opts.get("exclude_globs", []),
+                    custom_constraints=opts.get("include_custom_constraints", []),
+                )
+
+                excel_path = os.path.join(opts.get("out_dir", "./out"), "detailed_code_review.xlsx")
+                result = agent.run(excel_path=excel_path)
+
+                console.print(f"\n[green]✅ Batch Patch Analysis Complete![/green]")
+                console.print(f"[blue]📊 Files analysed: {result.get('patched', 0)}[/blue]")
+                console.print(f"[blue]📊 Original issues: {result.get('original_issue_count', 0)}[/blue]")
+                console.print(f"[blue]📊 Patched issues:  {result.get('patched_issue_count', 0)}[/blue]")
+                console.print(f"[bold]📊 NEW issues:      {result.get('new_issue_count', 0)}[/bold]")
+                console.print(f"[green]📄 Excel output:    {result.get('excel_path', 'N/A')}[/green]")
+                console.print(f"[green]📂 Patched files:   {result.get('output_dir', 'N/A')}[/green]")
+
+                sys.exit(0)
+
+            except Exception as e:
+                console.print(f"[red]❌ Batch Patch Analysis failed: {e}[/red]")
+                logger.error("Batch Patch Analysis failed", exc_info=True)
                 sys.exit(1)
 
         # ----------------------------------------------------

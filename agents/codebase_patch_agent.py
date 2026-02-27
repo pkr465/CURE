@@ -417,6 +417,31 @@ class CodebasePatchAgent:
                     shutil.rmtree(str(self._temp_dir), ignore_errors=True)
                 except Exception as e:
                     self.logger.warning(f"Failed to cleanup temp dir: {e}")
+            # Cleanup CCLS temporary JSON artifacts (preserve .ccls-cache)
+            self._cleanup_ccls_artifacts()
+
+    def _cleanup_ccls_artifacts(self):
+        """Remove temporary CCLS JSON artifacts from the output directory.
+
+        Preserves the .ccls-cache directory and .ccls config.
+        Only removes dependency-artifact JSON files tracked in cache metadata.
+        """
+        try:
+            from dependency_builder.cleanup import cleanup_ccls_artifacts
+            stats = cleanup_ccls_artifacts(
+                output_dir=str(self.output_dir),
+                project_root=str(self.codebase_path) if self.codebase_path else None,
+            )
+            if stats["files_removed"] > 0:
+                mb = stats["bytes_freed"] / (1024 * 1024)
+                self.logger.info(
+                    f"  CCLS cleanup: {stats['files_removed']} temp files removed "
+                    f"({mb:.1f} MB freed)"
+                )
+        except ImportError:
+            pass  # cleanup module not available
+        except Exception as e:
+            self.logger.debug(f"CCLS cleanup: {e}")
 
     # ------------------------------------------------------------------
     # Pipeline

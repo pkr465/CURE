@@ -15,6 +15,7 @@
 9. **Visualization**: Generates an HTML health report and provides a Streamlit UI dashboard.
 10. **Telemetry & Analytics**: Silent PostgreSQL-backed telemetry tracks issues found/fixed, LLM usage, run durations, and fix success rates with a built-in dashboard.
 11. **HITL Feedback Store**: PostgreSQL-backed persistent store for human feedback decisions and constraint rules, enabling agents to learn from accumulated human review history.
+12. **Batch Patch Agent**: Applies multi-file patches (with `===` file headers) to a local codebase, producing patched copies in `out/patched_files/` with folder structure preserved.
 
 ---
 
@@ -77,6 +78,7 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 ├── agents/
 │   ├── codebase_static_agent.py        # Unified 7-phase static analyzer
 │   ├── codebase_llm_agent.py           # LLM-exclusive per-file code reviewer
+│   ├── batch_patch_agent.py             # Batch multi-file patch application (=== header format)
 │   ├── codebase_fixer_agent.py         # Agentic code repair agent (source-aware, audit trail)
 │   ├── codebase_patch_agent.py         # Patch analysis agent (diff-based issue detection)
 │   ├── codebase_analysis_chat_agent.py # Interactive chat analysis agent
@@ -1233,6 +1235,70 @@ The patch agent runs all 5 deep static adapters on both original and patched fil
 ### Defensive Programming Rules
 
 Both the LLM analysis prompt and patch review prompt include strict rules preventing the LLM from flagging defensive programming patterns as bugs — redundant null checks, multi-layer bounds validation, switch default branches, and defense-in-depth patterns are all explicitly excluded from issue reporting.
+
+---
+
+## Batch Patch Agent
+
+The `BatchPatchAgent` (`agents/batch_patch_agent.py`) applies multi-file patches to a local codebase, producing patched copies in `out/patched_files/` with the codebase's folder structure preserved. It is designed for Perforce/depot-style patch files that contain diffs for many files in a single file.
+
+### Patch File Format
+
+The agent expects a multi-file patch with `===` headers separating each file's diff:
+
+```
+=== //depot/path/to/file.h#641 — /local/mnt/workspace/path/to/file.h
+2524c2524,2525
+<     A_UINT32 txop_us);
+---
+>     A_UINT32 txop_us,
+>     wal_pdev_t *pdev);
+=== //depot/path/to/cfg.c#805 — /local/mnt/workspace/path/to/cfg.c
+1589c1589,1591
+<     .opt.threshold = 5000,
+---
+>     .opt.threshold = 10000,
+>     .opt.reg_domain = 6000,
+>     .opt.max_limit = 12000,
+```
+
+Each section has a header with the server (depot) path and local path separated by ` — `, followed by normal or unified diff hunks.
+
+### Usage
+
+```bash
+# Reads codebase_path from global_config.yaml
+python agents/batch_patch_agent.py --patch-file t.patch
+
+# Explicit codebase path
+python agents/batch_patch_agent.py --patch-file t.patch --codebase-path /path/to/codebase
+
+# Dry run (show plan without writing files)
+python agents/batch_patch_agent.py --patch-file t.patch --dry-run
+```
+
+### CLI Options
+
+| Flag | Description |
+| :--- | :--- |
+| `--patch-file FILE` | Path to the multi-file patch (required) |
+| `--codebase-path PATH` | Root directory of source code (defaults to `global_config.yaml` `paths.code_base_path`) |
+| `--out-dir DIR` | Output directory (default: `./out`) |
+| `--config-file PATH` | Path to custom `global_config.yaml` |
+| `--dry-run` | Show what would be patched without writing files |
+| `--verbose` | Enable verbose output |
+
+### Output Structure
+
+```
+out/
+  patched_files/
+    components/rel/.../sched_algo/sched_algo.h        ← patched
+    components/rel/.../sched_algo/sched_algo_cfg.c     ← patched
+    components/rel/.../sched_algo/sched_algo_cfg.h     ← patched
+```
+
+The agent supports both normal diff (`NUMcNUM`, `NUMaNUM`, `NUMdNUM`) and unified diff (`@@`) formats, auto-detecting per file section. Files that cannot be found in the codebase are skipped with a warning — the agent does not abort on missing files.
 
 ---
 

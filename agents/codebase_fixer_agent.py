@@ -105,7 +105,7 @@ class CodebaseFixerAgent:
     ):
         self.codebase_root = Path(codebase_root).resolve()
         self.directives_path = Path(directives_file).resolve()
-        self.backup_dir = Path(backup_dir).resolve()
+        self.backup_dir = Path(backup_dir).resolve()  # Legacy param — patched files now go to output_dir/patched_files/
         self.output_dir = str(Path(output_dir).resolve())
         self.project_name = self.codebase_root.name
         self.start_time = datetime.now()
@@ -332,7 +332,6 @@ class CodebaseFixerAgent:
                 continue
 
             try:
-                self._backup_file(file_path)
                 # errors='replace' to prevent encoding crashes
                 original_content = file_path.read_text(encoding='utf-8', errors='replace')
 
@@ -347,11 +346,11 @@ class CodebaseFixerAgent:
                     raise ValueError("Safety Guard: New content too short (<80%). Reverting.")
 
                 if not self.dry_run:
-                    # Atomic Write
-                    self._atomic_write(file_path, new_content)
-                    self.logger.info(f"    -> [Success] File rewritten ({len(active_tasks)} tasks processed).")
+                    # Write patched file to out/patched_files/ — original is left untouched
+                    self._write_patched_file(file_path, new_content)
+                    self.logger.info(f"    -> [Success] Patched file written ({len(active_tasks)} tasks processed).")
                 else:
-                    self.logger.info(f"    -> [Dry Run] File would be rewritten ({len(active_tasks)} tasks processed).")
+                    self.logger.info(f"    -> [Dry Run] File would be patched ({len(active_tasks)} tasks processed).")
 
                 results.extend(chunk_results)
 
@@ -369,6 +368,9 @@ class CodebaseFixerAgent:
             self.logger.info("[!] Dry Run: Email report skipped.")
         elif not email_recipients:
             self.logger.info("[!] No email recipients configured. Report saved to: " + report_path)
+
+        # -- CCLS temporary artifact cleanup --------------------------------
+        self._cleanup_ccls_artifacts()
 
         return {
             "status": "completed",
@@ -1218,37 +1220,58 @@ class CodebaseFixerAgent:
 
         return " | ".join(warnings) if warnings else ""
 
-    def _atomic_write(self, file_path: Path, content: str):
-        """
-        [FIX] Write to temp file first, then move to ensure atomic save.
-        """
-        tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
-        try:
-            with open(tmp_path, 'w', encoding='utf-8') as f:
-                f.write(content)
-            shutil.move(tmp_path, file_path)
-        except Exception as e:
-            self.logger.error(f"Failed to write file {file_path}: {e}")
-            if tmp_path.exists():
-                os.remove(tmp_path)
+    def _write_patched_file(self, file_path: Path, content: str):
+        """Write fixed content to out/patched_files/ — original file is left untouched.
 
-    def _backup_file(self, file_path: Path):
-        """Backup file before modification."""
-        if self.dry_run:
-            return
+        The output path mirrors the codebase folder structure so the user
+        can review the patched tree and copy files back as needed.
+        """
+        tmp_path = None
         try:
             if file_path.is_relative_to(self.codebase_root):
                 rel_path = file_path.relative_to(self.codebase_root)
             else:
-                rel_path = file_path.name
+                rel_path = Path(file_path.name)
 
-            dest_path = self.backup_dir / rel_path
+            patched_dir = Path(self.output_dir) / "patched_files"
+            dest_path = patched_dir / rel_path
             dest_path.parent.mkdir(parents=True, exist_ok=True)
-            if not dest_path.exists():
-                shutil.copy2(file_path, dest_path)
+
+            # Atomic write: write to temp then move
+            tmp_path = dest_path.with_suffix(dest_path.suffix + ".tmp")
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+            shutil.move(str(tmp_path), str(dest_path))
+
+            self.logger.info(f"    Patched file saved: {dest_path}")
         except Exception as e:
-            if self.verbose:
-                self.logger.warning(f"    [!] Backup failed: {e}")
+            self.logger.error(f"Failed to write patched file for {file_path.name}: {e}")
+            if tmp_path and tmp_path.exists():
+                os.remove(tmp_path)
+
+    def _cleanup_ccls_artifacts(self):
+        """Remove temporary CCLS JSON artifacts from the output directory.
+
+        Preserves the .ccls-cache directory and .ccls config (expensive to
+        regenerate).  Only removes dependency-artifact JSON files tracked in
+        cache metadata.
+        """
+        try:
+            from dependency_builder.cleanup import cleanup_ccls_artifacts
+            stats = cleanup_ccls_artifacts(
+                output_dir=self.output_dir,
+                project_root=str(self.codebase_root),
+            )
+            if stats["files_removed"] > 0:
+                mb = stats["bytes_freed"] / (1024 * 1024)
+                self.logger.info(
+                    f"[*] CCLS cleanup: {stats['files_removed']} temp files removed "
+                    f"({mb:.1f} MB freed)"
+                )
+        except ImportError:
+            pass  # cleanup module not available — skip silently
+        except Exception as e:
+            self.logger.debug(f"CCLS cleanup: {e}")
 
     def _save_report(self, results: List[Dict], filename: str) -> str:
         """
@@ -1353,11 +1376,11 @@ class CodebaseFixerAgent:
                 "Start Time": self.start_time.strftime("%Y-%m-%d %H:%M:%S"),
                 "End Time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
                 "Duration": duration_str,
-                "Backup Location": str(self.backup_dir) if not self.dry_run else "N/A"
+                "Patched Files": str(Path(self.output_dir) / "patched_files") if not self.dry_run else "N/A"
             }
 
             stats = {
-                "Files Modified": str(modified_count),
+                "Files Patched": str(modified_count),
                 "Total Tasks": str(total_tasks),
                 "Fixed Successfully": str(fixed_count),
                 "Pending/Failed": str(failed_count)

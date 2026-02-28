@@ -14,7 +14,7 @@
 #   3. Create .venv virtual environment
 #   4. Install pip dependencies from requirements.txt
 #   5. Install system tools (ccls, lizard, flawfinder)
-#   6. Set up .env from .env.example (if needed)
+#   6. Set up .env from env.example (if needed)
 #   7. Create output directories
 #   8. Validate the installation
 #   9. Print launch instructions
@@ -243,14 +243,14 @@ fi
 step "Setting up environment configuration"
 
 ENV_FILE="$SCRIPT_DIR/.env"
-ENV_EXAMPLE="$SCRIPT_DIR/.env.example"
+ENV_EXAMPLE="$SCRIPT_DIR/env.example"
 
 if [[ -f "$ENV_FILE" ]]; then
     success ".env file already exists"
     info "Review .env and update API keys as needed"
 elif [[ -f "$ENV_EXAMPLE" ]]; then
     cp "$ENV_EXAMPLE" "$ENV_FILE"
-    success "Created .env from .env.example"
+    success "Created .env from env.example"
     warn "Edit .env and add your API keys (QGENIE_API_KEY / LLM_API_KEY)"
 else
     # Create a minimal .env — API keys only; everything else in global_config.yaml
@@ -268,12 +268,12 @@ ENVEOF
     warn "Edit .env and add your LLM_API_KEY (or QGENIE_API_KEY)"
 fi
 
-# Also create .env.example if missing
+# Also create env.example if missing
 if [[ ! -f "$ENV_EXAMPLE" ]]; then
     cat > "$ENV_EXAMPLE" << 'ENVEOF'
 # ── CURE Environment — API Keys Only ────────────────────────────────────────
 # Copy this file to .env and fill in your values:
-#   cp .env.example .env
+#   cp env.example .env
 #
 # All other configuration (paths, database, LLM models, etc.) lives in
 # global_config.yaml — edit that file to customize your environment.
@@ -284,7 +284,7 @@ QGENIE_API_KEY=""
 # ── LLM API Key (required when llm_provider is "anthropic" / "azure" etc.) ─
 LLM_API_KEY=""
 ENVEOF
-    success "Created .env.example template"
+    success "Created env.example template"
 fi
 
 # ============================================================================

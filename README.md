@@ -99,7 +99,7 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 ├── index.html                          # CURE product website
 ├── global_config.yaml                  # Hierarchical YAML configuration
 ├── requirements.txt                    # Python dependencies
-├── .env.example                        # API keys only (copy to .env)
+├── env.example                         # API keys only (copy to .env)
 ├── agents/
 │   ├── codebase_static_agent.py        # Unified 7-phase static analyzer
 │   ├── codebase_llm_agent.py           # LLM-exclusive per-file code reviewer
@@ -389,7 +389,7 @@ llm:
 Set API keys in `.env` (all other config lives in `global_config.yaml`):
 
 ```bash
-cp .env.example .env
+cp env.example .env
 # Edit .env:
 #   LLM_API_KEY=sk-...        # Anthropic / Azure / etc.
 #   QGENIE_API_KEY=...         # QGenie provider

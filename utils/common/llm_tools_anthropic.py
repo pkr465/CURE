@@ -113,8 +113,9 @@ class LLMConfig:
             return cls()
 
         api_key = (
-            gc.get("llm.anthropic_api_key")
-            or os.environ.get("ANTHROPIC_API_KEY")
+            gc.get("llm.llm_api_key")
+            or os.environ.get("LLM_API_KEY")
+            or os.environ.get("ANTHROPIC_API_KEY")  # backward compat
         )
 
         return cls(

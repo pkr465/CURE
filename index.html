@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CURE — Codebase Update & Refactor Engine for C/C++</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  :root{
+    --navy:#0A1A12;--deep:#060F0A;--cyan:#4ADE80;--blue:#22C55E;
+    --purple:#86EFAC;--amber:#F59E0B;--red:#EF4444;--green:#4ADE80;
+    --white:#F0F8F4;--gray:#94A3B8;--card:#0C1F14;
+    --border:rgba(74,222,128,.12);
+    --glow:0 0 40px rgba(74,222,128,.15);
+  }
+  html{scroll-behavior:smooth;font-size:16px}
+  body{
+    font-family:-apple-system,"SF Pro Display","Inter","Segoe UI",sans-serif;
+    background:var(--deep);color:var(--white);overflow-x:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--cyan);text-decoration:none;transition:color .2s}
+  a:hover{color:var(--blue)}
+
+  /* ── Animated circuit-board background ──────────────────── */
+  .grid-bg{
+    position:fixed;inset:0;z-index:0;pointer-events:none;
+    background-image:
+      linear-gradient(rgba(74,222,128,.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(74,222,128,.03) 1px, transparent 1px);
+    background-size:48px 48px;
+    animation:gridPulse 8s ease-in-out infinite;
+  }
+  @keyframes gridPulse{0%,100%{opacity:.5} 50%{opacity:1}}
+
+  /* ── Navbar ─────────────────────────────────────────────── */
+  nav{
+    position:fixed;top:0;left:0;right:0;z-index:100;
+    backdrop-filter:blur(20px);
+    background:rgba(6,18,32,.88);
+    border-bottom:1px solid var(--border);
+    padding:0 clamp(1rem,4vw,4rem);
+    display:flex;align-items:center;justify-content:space-between;
+    height:64px;
+  }
+  .logo{display:flex;align-items:center;gap:10px;font-weight:800;font-size:1.3rem;letter-spacing:-.5px}
+  .logo .mcu{
+    width:34px;height:34px;border:2px solid var(--cyan);border-radius:4px;
+    display:grid;place-items:center;position:relative;
+    background:rgba(74,222,128,.05);
+  }
+  .logo .mcu::before{
+    content:"{ }";font-size:.55rem;font-weight:900;color:var(--cyan);
+    text-shadow:0 0 8px var(--cyan);
+  }
+  .logo .mcu .pin{position:absolute;background:var(--cyan);border-radius:1px}
+  .logo .mcu .pin.t{top:-5px;left:50%;transform:translateX(-50%);width:2px;height:5px}
+  .logo .mcu .pin.b{bottom:-5px;left:50%;transform:translateX(-50%);width:2px;height:5px}
+  .logo .mcu .pin.l{left:-5px;top:50%;transform:translateY(-50%);width:5px;height:2px}
+  .logo .mcu .pin.r{right:-5px;top:50%;transform:translateY(-50%);width:5px;height:2px}
+  .logo .mcu .pin.tl{top:-5px;left:6px;width:2px;height:5px}
+  .logo .mcu .pin.tr{top:-5px;right:6px;width:2px;height:5px}
+  .logo .mcu .pin.bl{bottom:-5px;left:6px;width:2px;height:5px}
+  .logo .mcu .pin.br{bottom:-5px;right:6px;width:2px;height:5px}
+  .logo span{background:linear-gradient(135deg,var(--cyan),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+  .nav-links{display:flex;gap:2rem;align-items:center}
+  .nav-links a{color:var(--gray);font-size:.875rem;font-weight:500;transition:color .2s}
+  .nav-links a:hover{color:var(--white)}
+  .btn-nav{
+    padding:8px 20px;border-radius:8px;font-weight:600;font-size:.85rem;
+    background:linear-gradient(135deg,var(--cyan),var(--blue));color:var(--navy);
+    border:none;cursor:pointer;transition:transform .2s,box-shadow .2s;
+  }
+  .btn-nav:hover{transform:translateY(-1px);box-shadow:0 4px 20px rgba(74,222,128,.3)}
+
+  /* ── Hero ────────────────────────────────────────────────── */
+  .hero{
+    min-height:100vh;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;text-align:center;padding:120px 2rem 80px;
+    position:relative;z-index:1;
+  }
+  .hero-badge{
+    display:inline-flex;align-items:center;gap:8px;
+    padding:6px 16px;border-radius:100px;
+    background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.2);
+    font-size:.8rem;color:var(--cyan);font-weight:600;margin-bottom:2rem;
+    animation:fadeUp .8s ease;
+  }
+  .hero-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--cyan);animation:blink 2s infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
+  .hero h1{
+    font-size:clamp(2.5rem,6vw,5rem);font-weight:800;letter-spacing:-2px;
+    line-height:1.05;max-width:900px;
+    animation:fadeUp .8s ease .1s both;
+  }
+  .hero h1 .gradient{
+    background:linear-gradient(135deg,var(--cyan) 0%,var(--blue) 50%,var(--purple) 100%);
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  }
+  .hero p.tagline{
+    max-width:660px;color:var(--gray);font-size:1.15rem;line-height:1.7;
+    margin-top:1.5rem;animation:fadeUp .8s ease .2s both;
+  }
+  .hero-actions{
+    display:flex;gap:1rem;margin-top:2.5rem;flex-wrap:wrap;justify-content:center;
+    animation:fadeUp .8s ease .3s both;
+  }
+  .btn-primary{
+    padding:14px 32px;border-radius:12px;font-weight:700;font-size:1rem;
+    background:linear-gradient(135deg,var(--cyan),var(--blue));color:var(--navy);
+    border:none;cursor:pointer;transition:all .3s;
+  }
+  .btn-primary:hover{transform:translateY(-2px);box-shadow:0 8px 30px rgba(74,222,128,.35)}
+  .btn-secondary{
+    padding:14px 32px;border-radius:12px;font-weight:700;font-size:1rem;
+    background:transparent;color:var(--white);
+    border:1px solid rgba(255,255,255,.15);cursor:pointer;transition:all .3s;
+  }
+  .btn-secondary:hover{border-color:var(--cyan);color:var(--cyan)}
+  @keyframes fadeUp{from{opacity:0;transform:translateY(24px)}to{opacity:1;transform:translateY(0)}}
+
+  /* ── Hero dashboard mockup ──────────────────────────────── */
+  .hero-visual{
+    margin-top:4rem;position:relative;width:100%;max-width:1000px;
+    animation:fadeUp 1s ease .4s both;
+  }
+  .terminal-frame{
+    width:100%;aspect-ratio:16/7;border-radius:16px;
+    background:var(--card);border:1px solid var(--border);
+    position:relative;overflow:hidden;box-shadow:var(--glow);
+  }
+  .terminal-frame .scan-line{
+    position:absolute;top:0;left:0;right:0;height:2px;
+    background:linear-gradient(90deg,transparent,var(--cyan),transparent);
+    animation:scan 4s linear infinite;
+  }
+  @keyframes scan{0%{top:-2px}100%{top:100%}}
+
+  .dashboard-mock{padding:24px;height:100%;display:flex;flex-direction:column;gap:16px}
+  .dash-header{display:flex;justify-content:space-between;align-items:center}
+  .dash-header h3{font-size:.95rem;font-weight:700;color:var(--white)}
+  .dash-header .status{font-size:.75rem;color:var(--cyan);display:flex;align-items:center;gap:6px}
+  .dash-header .status::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--cyan);animation:blink 1.5s infinite}
+  .dash-metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+  .metric-card{
+    background:rgba(74,222,128,.04);border:1px solid var(--border);
+    border-radius:10px;padding:16px;text-align:left;
+  }
+  .metric-card .label{font-size:.7rem;color:var(--gray);text-transform:uppercase;letter-spacing:.8px;font-weight:600}
+  .metric-card .value{font-size:1.6rem;font-weight:800;margin-top:4px;font-variant-numeric:tabular-nums}
+  .metric-card .value.cyan{color:var(--cyan)}
+  .metric-card .value.blue{color:var(--blue)}
+  .metric-card .value.purple{color:var(--purple)}
+  .metric-card .value.amber{color:var(--amber)}
+  .metric-card .delta{font-size:.7rem;margin-top:4px}
+  .delta.up{color:var(--green)}
+  .delta.down{color:var(--red)}
+  .dash-bars{display:flex;gap:12px;flex:1;align-items:flex-end}
+  .bar-group{flex:1;display:flex;flex-direction:column;align-items:center;gap:6px}
+  .bar{width:100%;border-radius:6px 6px 2px 2px;transition:height 1.5s cubic-bezier(.22,1,.36,1)}
+  .bar-label{font-size:.6rem;color:var(--gray);font-weight:600;text-transform:uppercase;letter-spacing:.5px}
+
+  /* ── Section common ─────────────────────────────────────── */
+  section{position:relative;z-index:1;padding:100px clamp(1rem,4vw,4rem)}
+  .section-label{
+    font-size:.75rem;text-transform:uppercase;letter-spacing:2px;font-weight:700;
+    color:var(--cyan);margin-bottom:1rem;
+  }
+  .section-title{
+    font-size:clamp(2rem,4vw,3rem);font-weight:800;letter-spacing:-1px;
+    max-width:700px;line-height:1.15;
+  }
+  .section-desc{color:var(--gray);max-width:580px;line-height:1.7;margin-top:1rem;font-size:1.05rem}
+
+  /* ── Features grid ──────────────────────────────────────── */
+  .features{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1.5rem;margin-top:3.5rem}
+  .feature-card{
+    background:var(--card);border:1px solid var(--border);border-radius:16px;
+    padding:32px;transition:all .35s;position:relative;overflow:hidden;
+  }
+  .feature-card:hover{
+    border-color:rgba(74,222,128,.3);
+    transform:translateY(-4px);
+    box-shadow:var(--glow);
+  }
+  .feature-card::before{
+    content:"";position:absolute;top:0;left:0;right:0;height:2px;
+    background:linear-gradient(90deg,var(--cyan),var(--blue));
+    opacity:0;transition:opacity .3s;
+  }
+  .feature-card:hover::before{opacity:1}
+  .feature-icon{
+    width:48px;height:48px;border-radius:12px;display:grid;place-items:center;
+    font-size:1.4rem;margin-bottom:1.25rem;
+  }
+  .feature-card h3{font-size:1.1rem;font-weight:700;margin-bottom:.5rem}
+  .feature-card p{color:var(--gray);font-size:.9rem;line-height:1.6}
+  .icon-cyan{background:rgba(74,222,128,.1);color:var(--cyan)}
+  .icon-blue{background:rgba(34,197,94,.1);color:var(--blue)}
+  .icon-purple{background:rgba(134,239,172,.1);color:var(--purple)}
+  .icon-amber{background:rgba(245,158,11,.1);color:var(--amber)}
+  .icon-red{background:rgba(239,68,68,.1);color:var(--red)}
+  .icon-green{background:rgba(34,197,94,.1);color:var(--green)}
+
+  /* ── Pipeline ───────────────────────────────────────────── */
+  .pipeline-flow{
+    display:flex;align-items:center;gap:0;margin-top:3.5rem;
+    overflow-x:auto;padding-bottom:1rem;
+  }
+  .pipe-step{
+    flex:0 0 auto;background:var(--card);border:1px solid var(--border);
+    border-radius:14px;padding:24px 28px;min-width:170px;text-align:center;
+    transition:all .3s;
+  }
+  .pipe-step:hover{border-color:rgba(74,222,128,.3);box-shadow:var(--glow)}
+  .pipe-step .num{
+    width:32px;height:32px;border-radius:50%;display:inline-grid;place-items:center;
+    font-size:.8rem;font-weight:800;margin-bottom:12px;
+    background:linear-gradient(135deg,var(--cyan),var(--blue));color:var(--navy);
+  }
+  .pipe-step h4{font-size:.9rem;font-weight:700;margin-bottom:4px}
+  .pipe-step p{font-size:.75rem;color:var(--gray)}
+  .pipe-arrow{flex:0 0 auto;color:var(--cyan);font-size:1.5rem;padding:0 8px;opacity:.5}
+
+  /* ── Install code block ─────────────────────────────────── */
+  .install-block{
+    margin-top:3rem;max-width:700px;
+    background:var(--card);border:1px solid var(--border);border-radius:14px;
+    overflow:hidden;
+  }
+  .install-header{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:12px 20px;background:rgba(74,222,128,.04);border-bottom:1px solid var(--border);
+  }
+  .install-header span{font-size:.75rem;color:var(--gray);font-weight:600}
+  .install-header .copy-btn{
+    padding:4px 12px;border-radius:6px;font-size:.7rem;font-weight:700;
+    background:rgba(74,222,128,.1);color:var(--cyan);border:1px solid rgba(74,222,128,.2);
+    cursor:pointer;transition:all .2s;
+  }
+  .install-header .copy-btn:hover{background:rgba(74,222,128,.2)}
+  .install-code{padding:20px;font-family:"SF Mono","Fira Code","Cascadia Code",monospace;font-size:.85rem;line-height:1.8;color:var(--gray)}
+  .install-code .cmd{color:var(--cyan)}
+  .install-code .comment{color:#4a6785}
+
+  /* ── Stats strip ────────────────────────────────────────── */
+  .stats-strip{
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1.5rem;
+    margin-top:3.5rem;
+  }
+  .stat-box{text-align:center;padding:2rem}
+  .stat-box .number{
+    font-size:3rem;font-weight:900;letter-spacing:-2px;
+    background:linear-gradient(135deg,var(--cyan),var(--blue));
+    -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  }
+  .stat-box .unit{font-size:.85rem;color:var(--gray);margin-top:.25rem;font-weight:500}
+
+  /* ── Adapter chips ──────────────────────────────────────── */
+  .analyzer-grid{
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-top:3rem;
+  }
+  .analyzer-chip{
+    background:var(--card);border:1px solid var(--border);border-radius:10px;
+    padding:16px;text-align:center;font-size:.8rem;font-weight:600;
+    transition:all .3s;cursor:default;
+  }
+  .analyzer-chip:hover{border-color:var(--cyan);box-shadow:0 0 20px rgba(74,222,128,.1)}
+  .analyzer-chip .az-icon{font-size:1.3rem;margin-bottom:6px;display:block}
+
+  /* ── CTA ────────────────────────────────────────────────── */
+  .cta-section{text-align:center;padding:120px 2rem}
+  .cta-section h2{
+    font-size:clamp(2rem,4vw,3.2rem);font-weight:800;letter-spacing:-1px;
+    margin-bottom:1rem;
+  }
+  .cta-section p{color:var(--gray);max-width:520px;margin:0 auto 2.5rem;font-size:1.05rem;line-height:1.7}
+
+  /* ── Footer ─────────────────────────────────────────────── */
+  footer{
+    border-top:1px solid var(--border);padding:3rem clamp(1rem,4vw,4rem);
+    display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;
+    position:relative;z-index:1;
+  }
+  footer .copy{color:var(--gray);font-size:.8rem}
+  footer .foot-links{display:flex;gap:1.5rem}
+  footer .foot-links a{color:var(--gray);font-size:.8rem}
+
+  /* ── Scroll reveal ──────────────────────────────────────── */
+  .reveal{opacity:0;transform:translateY(30px);transition:all .7s cubic-bezier(.22,1,.36,1)}
+  .reveal.visible{opacity:1;transform:translateY(0)}
+
+  /* ── Responsive ─────────────────────────────────────────── */
+  @media(max-width:768px){
+    .nav-links a:not(.btn-nav){display:none}
+    .dash-metrics{grid-template-columns:repeat(2,1fr)}
+    .pipeline-flow{flex-wrap:wrap}
+    .pipe-arrow{display:none}
+  }
+</style>
+</head>
+<body>
+
+<div class="grid-bg"></div>
+
+<!-- ── Navbar ───────────────────────────────────────────────── -->
+<nav>
+  <div class="logo">
+    <div class="mcu">
+      <div class="pin t"></div><div class="pin b"></div>
+      <div class="pin l"></div><div class="pin r"></div>
+      <div class="pin tl"></div><div class="pin tr"></div>
+      <div class="pin bl"></div><div class="pin br"></div>
+    </div>
+    <span>CURE</span>
+  </div>
+  <div class="nav-links">
+    <a href="#features">Features</a>
+    <a href="#pipeline">Pipeline</a>
+    <a href="#adapters">Adapters</a>
+    <a href="#install">Install</a>
+    <button class="btn-nav" onclick="window.open('http://localhost:8502','_blank')">Launch Dashboard</button>
+  </div>
+</nav>
+
+<!-- ── Hero ─────────────────────────────────────────────────── -->
+<section class="hero">
+  <div class="hero-badge"><span class="dot"></span> Built for C/C++ Codebases</div>
+  <h1>Production-Grade<br><span class="gradient">Code Analysis &amp; Repair</span></h1>
+  <p class="tagline">CURE is the multi-agent intelligence engine that finds memory bugs, null-pointer hazards, buffer overflows, and complexity hotspots across your entire C/C++ codebase — then fixes them.</p>
+  <div class="hero-actions">
+    <button class="btn-primary" onclick="window.open('http://localhost:8502','_blank')">Start Analysis</button>
+    <button class="btn-secondary" onclick="document.getElementById('pipeline').scrollIntoView({behavior:'smooth'})">See How It Works</button>
+  </div>
+
+  <div class="hero-visual">
+    <div class="terminal-frame">
+      <div class="scan-line"></div>
+      <div class="dashboard-mock">
+        <div class="dash-header">
+          <h3>CURE Codebase Health Dashboard</h3>
+          <div class="status">Analyzing 1,247 source files</div>
+        </div>
+        <div class="dash-metrics">
+          <div class="metric-card">
+            <div class="label">Health Score</div>
+            <div class="value cyan" id="score1">0</div>
+            <div class="delta up">+8 from last run</div>
+          </div>
+          <div class="metric-card">
+            <div class="label">Critical Issues</div>
+            <div class="value amber" id="score2">0</div>
+            <div class="delta down">7 null-deref</div>
+          </div>
+          <div class="metric-card">
+            <div class="label">Files Analysed</div>
+            <div class="value blue" id="score3">0</div>
+            <div class="delta up">100% coverage</div>
+          </div>
+          <div class="metric-card">
+            <div class="label">Auto-Fixed</div>
+            <div class="value purple" id="score4">0</div>
+            <div class="delta up">92% success rate</div>
+          </div>
+        </div>
+        <div class="dash-bars" id="barChart"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ── Features ─────────────────────────────────────────────── -->
+<section id="features">
+  <div class="section-label reveal">Capabilities</div>
+  <div class="section-title reveal">Everything you need for<br>production-grade C/C++ code</div>
+  <div class="section-desc reveal">Five deep static adapters, four context layers, LLM-powered code review, human-in-the-loop feedback, and multi-file patch analysis — all in a single pipeline.</div>
+
+  <div class="features">
+    <div class="feature-card reveal">
+      <div class="feature-icon icon-cyan">&#9889;</div>
+      <h3>Deep Static Analysis</h3>
+      <p>AST-accurate analysis via CCLS/libclang, Lizard cyclomatic complexity, and Flawfinder CWE-mapped security scanning — not regex heuristics.</p>
+    </div>
+    <div class="feature-card reveal">
+      <div class="feature-icon icon-blue">&#128268;</div>
+      <h3>Call Graph &amp; Dead Code</h3>
+      <p>BFS reachability from entry points, fan-in/fan-out analysis, cycle detection, and max call depth. Find unreachable code before it ships.</p>
+    </div>
+    <div class="feature-card reveal">
+      <div class="feature-icon icon-purple">&#128736;</div>
+      <h3>LLM Patch Review</h3>
+      <p>Analyses only lines changed by a patch. Runs original vs. patched comparison to identify issues <em>introduced</em> by the change — zero pre-existing noise.</p>
+    </div>
+    <div class="feature-card reveal">
+      <div class="feature-icon icon-amber">&#128270;</div>
+      <h3>Context-Aware Analysis</h3>
+      <p>Four context layers — header resolution, constraint validation, call-stack tracing, and parameter validation — give the LLM real codebase context, not just isolated files.</p>
+    </div>
+    <div class="feature-card reveal">
+      <div class="feature-icon icon-red">&#128295;</div>
+      <h3>Auto-Repair Engine</h3>
+      <p>CodebaseFixerAgent reads human feedback from Excel, applies LLM-guided fixes with structural validation, and writes patched files — originals untouched.</p>
+    </div>
+    <div class="feature-card reveal">
+      <div class="feature-icon icon-green">&#128202;</div>
+      <h3>Batch Patch Analysis</h3>
+      <p>Analyse entire Perforce changelists, Git diffs, or unified patches. Auto-detects five header formats and runs CodebasePatchAgent per file.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ── Pipeline ─────────────────────────────────────────────── -->
+<section id="pipeline" style="background:rgba(74,222,128,.02)">
+  <div class="section-label reveal">Pipeline</div>
+  <div class="section-title reveal">Analyse, review, fix —<br>in a single workflow</div>
+  <div class="section-desc reveal">From file discovery to validated patched files — CURE orchestrates every step of your C/C++ quality pipeline.</div>
+
+  <div class="pipeline-flow reveal">
+    <div class="pipe-step"><div class="num">1</div><h4>Scan</h4><p>.c .cpp .h .hpp</p></div>
+    <div class="pipe-arrow">&#10230;</div>
+    <div class="pipe-step"><div class="num">2</div><h4>Static Analysis</h4><p>5 deep adapters</p></div>
+    <div class="pipe-arrow">&#10230;</div>
+    <div class="pipe-step"><div class="num">3</div><h4>LLM Review</h4><p>Semantic analysis</p></div>
+    <div class="pipe-arrow">&#10230;</div>
+    <div class="pipe-step"><div class="num">4</div><h4>Excel Report</h4><p>Issues + severity</p></div>
+    <div class="pipe-arrow">&#10230;</div>
+    <div class="pipe-step"><div class="num">5</div><h4>Human Review</h4><p>Feedback &amp; constraints</p></div>
+    <div class="pipe-arrow">&#10230;</div>
+    <div class="pipe-step"><div class="num">6</div><h4>Auto-Fix</h4><p>LLM-guided repair</p></div>
+    <div class="pipe-arrow">&#10230;</div>
+    <div class="pipe-step"><div class="num">7</div><h4>Validate</h4><p>Structure checks</p></div>
+  </div>
+
+  <div style="margin-top:3.5rem" class="reveal">
+    <div class="section-label">Patch Workflow</div>
+    <div class="section-desc" style="margin-top:.5rem">The same pipeline powers patch analysis: analyse the patch, identify new issues, apply fixes, validate, and output clean patched files.</div>
+  </div>
+
+  <div class="pipeline-flow reveal" style="margin-top:2rem">
+    <div class="pipe-step"><div class="num">1</div><h4>Parse Patch</h4><p>P4 / Git / Unified</p></div>
+    <div class="pipe-arrow">&#10230;</div>
+    <div class="pipe-step"><div class="num">2</div><h4>Analyse</h4><p>Original vs. Patched</p></div>
+    <div class="pipe-arrow">&#10230;</div>
+    <div class="pipe-step"><div class="num">3</div><h4>Diff Findings</h4><p>New issues only</p></div>
+    <div class="pipe-arrow">&#10230;</div>
+    <div class="pipe-step"><div class="num">4</div><h4>Fix &amp; Validate</h4><p>Fixer Agent</p></div>
+    <div class="pipe-arrow">&#10230;</div>
+    <div class="pipe-step"><div class="num">5</div><h4>Patched Files</h4><p>out/patched_files/</p></div>
+  </div>
+</section>
+
+<!-- ── Adapters ──────────────────────────────────────────────── -->
+<section id="adapters">
+  <div class="section-label reveal">Analysis Engine</div>
+  <div class="section-title reveal">Five deep adapters.<br>Four context layers.</div>
+  <div class="section-desc reveal">Purpose-built for C/C++ codebases — real AST analysis via CCLS, not repurposed web tooling.</div>
+
+  <div class="analyzer-grid reveal">
+    <div class="analyzer-chip"><span class="az-icon">&#9881;</span>AST Complexity</div>
+    <div class="analyzer-chip"><span class="az-icon">&#128274;</span>Security (CWE)</div>
+    <div class="analyzer-chip"><span class="az-icon">&#128683;</span>Dead Code</div>
+    <div class="analyzer-chip"><span class="az-icon">&#128279;</span>Call Graph</div>
+    <div class="analyzer-chip"><span class="az-icon">&#128201;</span>Function Metrics</div>
+  </div>
+
+  <div style="margin-top:2.5rem" class="reveal">
+    <div class="section-label" style="margin-top:2rem">Context Layers</div>
+  </div>
+  <div class="analyzer-grid reveal">
+    <div class="analyzer-chip"><span class="az-icon">&#128196;</span>Header Resolution</div>
+    <div class="analyzer-chip"><span class="az-icon">&#128269;</span>Context Validation</div>
+    <div class="analyzer-chip"><span class="az-icon">&#128260;</span>Call Stack Tracing</div>
+    <div class="analyzer-chip"><span class="az-icon">&#128300;</span>Param Validation</div>
+  </div>
+
+  <div style="margin-top:2.5rem" class="reveal">
+    <div class="section-label" style="margin-top:2rem">Agents</div>
+  </div>
+  <div class="analyzer-grid reveal">
+    <div class="analyzer-chip"><span class="az-icon">&#128300;</span>Static Analyzer</div>
+    <div class="analyzer-chip"><span class="az-icon">&#129302;</span>LLM Code Reviewer</div>
+    <div class="analyzer-chip"><span class="az-icon">&#128295;</span>Fixer Agent</div>
+    <div class="analyzer-chip"><span class="az-icon">&#128203;</span>Patch Agent</div>
+    <div class="analyzer-chip"><span class="az-icon">&#128230;</span>Batch Patch Agent</div>
+  </div>
+</section>
+
+<!-- ── Metrics ───────────────────────────────────────────────── -->
+<section id="metrics" style="background:rgba(74,222,128,.02)">
+  <div class="section-label reveal">By the Numbers</div>
+  <div class="section-title reveal">Built for production<br>C/C++ engineering teams</div>
+
+  <div class="stats-strip reveal">
+    <div class="stat-box"><div class="number">5</div><div class="unit">Deep Static Adapters</div></div>
+    <div class="stat-box"><div class="number">4</div><div class="unit">Context Layers</div></div>
+    <div class="stat-box"><div class="number">5</div><div class="unit">Patch Formats</div></div>
+    <div class="stat-box"><div class="number">3</div><div class="unit">Repair Agents</div></div>
+    <div class="stat-box"><div class="number">5</div><div class="unit">LLM Providers</div></div>
+  </div>
+</section>
+
+<!-- ── Install ──────────────────────────────────────────────── -->
+<section id="install">
+  <div class="section-label reveal">Quick Start</div>
+  <div class="section-title reveal">Up and running<br>in one command</div>
+  <div class="section-desc reveal">Works on macOS, Linux, and Windows (WSL). The installer handles Python, dependencies, system tools, and environment setup.</div>
+
+  <div class="install-block reveal">
+    <div class="install-header">
+      <span>Terminal</span>
+      <button class="copy-btn" onclick="navigator.clipboard.writeText('chmod +x install.sh && ./install.sh')">Copy</button>
+    </div>
+    <div class="install-code">
+      <div><span class="comment"># One-command setup</span></div>
+      <div><span class="cmd">chmod +x install.sh && ./install.sh</span></div>
+      <div style="margin-top:16px"><span class="comment"># Launch the dashboard</span></div>
+      <div><span class="cmd">./launch.sh</span></div>
+      <div style="margin-top:16px"><span class="comment"># Launch dashboard + open website</span></div>
+      <div><span class="cmd">./launch.sh --website</span></div>
+      <div style="margin-top:16px"><span class="comment"># Run analysis from CLI</span></div>
+      <div><span class="cmd">python main.py --llm-exclusive --codebase-path /path/to/your/code</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── CTA ──────────────────────────────────────────────────── -->
+<section class="cta-section" id="cta">
+  <div class="section-label reveal">Ready to Ship Better Code?</div>
+  <h2 class="reveal">Start analyzing your<br><span style="background:linear-gradient(135deg,var(--cyan),var(--blue));-webkit-background-clip:text;-webkit-text-fill-color:transparent">C/C++ codebase today</span></h2>
+  <p class="reveal">Point CURE at your C/C++ project and get a comprehensive health report with actionable fixes in minutes — not weeks.</p>
+  <div class="reveal" style="display:flex;gap:1rem;justify-content:center;flex-wrap:wrap">
+    <button class="btn-primary" style="font-size:1.1rem;padding:16px 40px" onclick="window.open('http://localhost:8502','_blank')">Launch CURE Dashboard</button>
+    <button class="btn-secondary" style="font-size:1.1rem;padding:16px 40px" onclick="document.getElementById('install').scrollIntoView({behavior:'smooth'})">Quick Start Guide</button>
+  </div>
+</section>
+
+<!-- ── Footer ──────────────────────────────────────────────── -->
+<footer>
+  <div class="copy">&copy; 2026 CURE — Codebase Update &amp; Refactor Engine. All rights reserved.</div>
+  <div class="foot-links">
+    <a href="#">Documentation</a>
+    <a href="#">GitHub</a>
+    <a href="#">Contact</a>
+  </div>
+</footer>
+
+<script>
+// ── Scroll reveal ─────────────────────────────────────────
+const obs = new IntersectionObserver((entries) => {
+  entries.forEach(e => { if(e.isIntersecting) e.target.classList.add('visible') });
+}, {threshold: 0.1});
+document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
+
+// ── Animated counters ─────────────────────────────────────
+function animateCounter(id, target, suffix='') {
+  const el = document.getElementById(id);
+  if (!el) return;
+  let current = 0;
+  const step = Math.max(1, Math.floor(target / 60));
+  const timer = setInterval(() => {
+    current += step;
+    if (current >= target) { current = target; clearInterval(timer); }
+    el.textContent = current + suffix;
+  }, 25);
+}
+setTimeout(() => {
+  animateCounter('score1', 82, '/A');
+  animateCounter('score2', 23);
+  animateCounter('score3', 1247);
+  animateCounter('score4', 189);
+}, 800);
+
+// ── Bar chart ─────────────────────────────────────────────
+const barData = [
+  {label:'Memory',  height:72, color:'var(--red)'},
+  {label:'NullPtr', height:65, color:'var(--amber)'},
+  {label:'Buffer',  height:48, color:'var(--red)'},
+  {label:'Cmplx',   height:85, color:'var(--cyan)'},
+  {label:'Dead',    height:55, color:'var(--purple)'},
+  {label:'Security',height:78, color:'var(--amber)'},
+  {label:'Params',  height:90, color:'var(--cyan)'},
+  {label:'CallG',   height:68, color:'var(--blue)'},
+];
+const chart = document.getElementById('barChart');
+if (chart) {
+  barData.forEach((d,i) => {
+    const g = document.createElement('div');
+    g.className = 'bar-group';
+    const b = document.createElement('div');
+    b.className = 'bar';
+    b.style.background = `linear-gradient(180deg, ${d.color}, ${d.color}44)`;
+    b.style.height = '0%';
+    const l = document.createElement('div');
+    l.className = 'bar-label';
+    l.textContent = d.label;
+    g.appendChild(b);
+    g.appendChild(l);
+    chart.appendChild(g);
+    setTimeout(() => { b.style.height = d.height + '%'; }, 1000 + i * 100);
+  });
+}
+</script>
+</body>
+</html>

@@ -1,6 +1,27 @@
-# QGenie — C/C++ Codebase Update & Refactor Engine
+# CURE — Codebase Update & Refactor Engine
 
-`main.py` is the main entry point for a **multi-stage C/C++ codebase health analysis pipeline**. It is designed to analyze C/C++ codebases and produce rich health scores, structural metadata, and embeddings suitable for RAG (Retrieval-Augmented Generation) applications.
+`main.py` is the main entry point for a **multi-stage embedded C/C++ codebase health analysis pipeline**. It is designed to analyze C/C++ codebases and produce rich health scores, structural metadata, and embeddings suitable for RAG (Retrieval-Augmented Generation) applications.
+
+---
+
+## Quick Start
+
+```bash
+# One-command setup (macOS / Linux / WSL)
+chmod +x install.sh && ./install.sh
+
+# Launch the Streamlit dashboard
+./launch.sh
+
+# Launch dashboard + open website
+./launch.sh --website
+
+# Run analysis from CLI
+source .venv/bin/activate
+python main.py --llm-exclusive --codebase-path /path/to/firmware
+```
+
+The installer handles Python 3.9+, virtual environment, pip dependencies, system tools (ccls, lizard, flawfinder), and `.env` setup across all three platforms.
 
 ## Key Capabilities
 
@@ -15,7 +36,7 @@
 9. **Visualization**: Generates an HTML health report and provides a Streamlit UI dashboard.
 10. **Telemetry & Analytics**: Silent PostgreSQL-backed telemetry tracks issues found/fixed, LLM usage, run durations, and fix success rates with a built-in dashboard.
 11. **HITL Feedback Store**: PostgreSQL-backed persistent store for human feedback decisions and constraint rules, enabling agents to learn from accumulated human review history.
-12. **Batch Patch Agent**: Applies multi-file patches (with `===` file headers) to a local codebase, producing patched copies in `out/patched_files/` with folder structure preserved.
+12. **Batch Patch Agent**: Analyses multi-file patches (Perforce, Git, unified diff) against a local codebase — runs full LLM + static analysis per file, then applies fixes via the fixer pipeline.
 
 ---
 
@@ -72,9 +93,13 @@ All adapters inherit from `BaseStaticAdapter` and degrade gracefully when their 
 ```text
 .
 ├── main.py                             # Entry point & LangGraph workflow
-├── fixer_workflow.py                   # Human-in-the-loop repair workflow
+├── fixer_workflow.py                   # Analyse + fix workflow (fixer, patch, batch-patch)
+├── install.sh                          # One-command cross-platform installer
+├── launch.sh                           # Convenience launcher (dashboard + website)
+├── index.html                          # CURE product website
 ├── global_config.yaml                  # Hierarchical YAML configuration
 ├── requirements.txt                    # Python dependencies
+├── .env.example                        # API keys only (copy to .env)
 ├── agents/
 │   ├── codebase_static_agent.py        # Unified 7-phase static analyzer
 │   ├── codebase_llm_agent.py           # LLM-exclusive per-file code reviewer
@@ -361,14 +386,13 @@ llm:
   # model: azure::gpt-4.1                       # Azure OpenAI
 ```
 
-Set API keys via environment or `.env`:
+Set API keys in `.env` (all other config lives in `global_config.yaml`):
 
 ```bash
-cp env.example .env
+cp .env.example .env
 # Edit .env:
-#   ANTHROPIC_API_KEY=sk-...
-#   QGENIE_API_KEY=...
-#   POSTGRES_PASSWORD=...
+#   LLM_API_KEY=sk-...        # Anthropic / Azure / etc.
+#   QGENIE_API_KEY=...         # QGenie provider
 ```
 
 ## 🛡️ Constraints & Rules Engine
@@ -564,6 +588,16 @@ python main.py --llm-exclusive --llm-model "azure::gpt-4.1" \
 ### Streamlit Dashboard
 
 ```bash
+# Via launcher (recommended — auto-activates venv, prints URLs)
+./launch.sh
+
+# With website
+./launch.sh --website
+
+# Custom port
+./launch.sh --port 8503
+
+# Direct Streamlit command
 python -m streamlit run ui/app.py --server.port 8502
 ```
 
@@ -586,14 +620,21 @@ The pipeline includes a **CodebaseFixerAgent** that closes the loop between anal
 ### Fixer Commands
 
 ```bash
-# Single-step (parse + fix)
-python fixer_workflow.py --excel detailed_code_review.xlsx --codebase-path /path/to/project
+# Parse Excel + apply fixes (default mode)
+python fixer_workflow.py --excel-file detailed_code_review.xlsx \
+  --codebase-path /path/to/project
 
-# Parse Excel to JSONL only
-python fixer_workflow.py --step parse --excel detailed_code_review.xlsx
+# Fix only LLM-reported issues
+python fixer_workflow.py --excel-file detailed_code_review.xlsx \
+  --codebase-path /path/to/project --fix-source llm
 
-# Run the fixer agent only
-python fixer_workflow.py --step fix --codebase-path /path/to/project
+# Fix only patch-reported issues
+python fixer_workflow.py --excel-file detailed_code_review.xlsx \
+  --codebase-path /path/to/project --fix-source patch
+
+# Dry run (simulate without writing files)
+python fixer_workflow.py --excel-file detailed_code_review.xlsx \
+  --codebase-path /path/to/project --dry-run
 ```
 
 ### Patch Workflow (single-file) — Analyse + Fix

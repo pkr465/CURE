@@ -18,19 +18,19 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import pandas as pd
 import streamlit as st
 
-# ── Brand constants (Apple-inspired light theme) ────────────────────────────
-CURE_PRIMARY = "#007AFF"        # Apple blue
-CURE_BG = "#FFFFFF"             # Pure white background
-CURE_SURFACE = "#F5F5F7"       # Apple light gray (cards, sections)
-CURE_CARD_BG = "#FFFFFF"        # White cards
-CURE_TEXT = "#1D1D1F"           # Apple near-black text
-CURE_TEXT_SECONDARY = "#86868B" # Apple secondary gray
-CURE_ACCENT = "#007AFF"        # Apple blue accent
-CURE_GREEN = "#34C759"         # Apple green
-CURE_GOLD = "#FF9F0A"          # Apple orange/gold
-CURE_RED = "#FF3B30"           # Apple red
-CURE_BORDER = "#D2D2D7"        # Apple border gray
-CURE_SIDEBAR_BG = "#F5F5F7"    # Light sidebar
+# ── Brand constants (Apple-green dark theme) ─────────────────────────────────
+CURE_PRIMARY = "#4ADE80"        # Apple green (primary accent)
+CURE_BG = "#060F0A"             # Deep dark green background
+CURE_SURFACE = "#0C1F14"       # Dark green surface (cards, sections)
+CURE_CARD_BG = "#0C1F14"        # Dark green cards
+CURE_TEXT = "#F0F8F4"           # Off-white with green tint
+CURE_TEXT_SECONDARY = "#94A3B8" # Muted slate gray
+CURE_ACCENT = "#22C55E"        # Deeper green accent
+CURE_GREEN = "#4ADE80"         # Apple green (success)
+CURE_GOLD = "#F59E0B"          # Amber / gold (warning)
+CURE_RED = "#EF4444"           # Red (error / critical)
+CURE_BORDER = "rgba(74,222,128,0.15)"  # Green-tinted border
+CURE_SIDEBAR_BG = "#0A1A12"    # Dark green sidebar
 
 # Legacy alias for backwards compatibility
 CURE_CYAN = CURE_PRIMARY
@@ -42,7 +42,7 @@ CURE_DARK_BG = CURE_SURFACE
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def app_css() -> None:
-    """Injects Apple-inspired light-theme global CSS styling."""
+    """Injects apple-green dark-theme global CSS styling."""
     st.markdown(
         f"""
         <style>
@@ -55,7 +55,7 @@ def app_css() -> None:
             -moz-osx-font-smoothing: grayscale;
         }}
 
-        /* ── Main content area — clean white bg ──────────────────── */
+        /* ── Main content area — dark green bg ───────────────────── */
         .stApp {{
             background-color: {CURE_BG} !important;
         }}
@@ -65,13 +65,13 @@ def app_css() -> None:
 
         /* ── Table styling ───────────────────────────────────────── */
         table, th, td {{
-            background-color: {CURE_BG} !important;
+            background-color: {CURE_SURFACE} !important;
             color: {CURE_TEXT} !important;
             border-color: {CURE_BORDER} !important;
         }}
         thead th {{
-            background-color: {CURE_SURFACE} !important;
-            color: {CURE_TEXT} !important;
+            background-color: #0A1A12 !important;
+            color: {CURE_PRIMARY} !important;
             font-weight: 600 !important;
             font-size: 13px !important;
             text-transform: uppercase;
@@ -102,7 +102,7 @@ def app_css() -> None:
             margin-bottom: 16px;
         }}
 
-        /* ── Sidebar — Apple-style light panel ───────────────────── */
+        /* ── Sidebar — dark green panel ────────────────────────── */
         [data-testid="stSidebar"] {{
             background: {CURE_SIDEBAR_BG} !important;
             border-right: 1px solid {CURE_BORDER};
@@ -132,17 +132,23 @@ def app_css() -> None:
             color: {CURE_TEXT} !important;
         }}
 
-        /* ── Buttons — Apple style ───────────────────────────────── */
+        /* ── Buttons — green accent ──────────────────────────────── */
         .stButton > button[kind="primary"] {{
             background-color: {CURE_PRIMARY} !important;
+            color: #0A1A12 !important;
             border: none !important;
             border-radius: 8px !important;
-            font-weight: 500 !important;
+            font-weight: 600 !important;
         }}
         .stButton > button {{
             border-radius: 8px !important;
             border: 1px solid {CURE_BORDER} !important;
             font-weight: 500 !important;
+            color: {CURE_TEXT} !important;
+        }}
+        .stButton > button:hover {{
+            border-color: {CURE_PRIMARY} !important;
+            box-shadow: 0 0 15px rgba(74,222,128,0.15) !important;
         }}
 
         /* ── Tabs styling ────────────────────────────────────────── */
@@ -159,15 +165,21 @@ def app_css() -> None:
             color: {CURE_TEXT_SECONDARY} !important;
         }}
         .stTabs [aria-selected="true"] {{
-            background-color: {CURE_BG} !important;
-            color: {CURE_TEXT} !important;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.08) !important;
+            background-color: #0A1A12 !important;
+            color: {CURE_PRIMARY} !important;
+            box-shadow: 0 0 12px rgba(74,222,128,0.08) !important;
         }}
 
         /* ── Input fields ────────────────────────────────────────── */
         .stTextInput input, .stNumberInput input, .stSelectbox select {{
             border-radius: 8px !important;
             border: 1px solid {CURE_BORDER} !important;
+            background: {CURE_SURFACE} !important;
+            color: {CURE_TEXT} !important;
+        }}
+        .stTextInput input:focus, .stNumberInput input:focus {{
+            border-color: {CURE_PRIMARY} !important;
+            box-shadow: 0 0 10px rgba(74,222,128,0.12) !important;
         }}
 
         /* ── Feedback row ────────────────────────────────────────── */
@@ -189,11 +201,11 @@ def app_css() -> None:
             border-radius: 8px;
             border: 1px solid {CURE_BORDER};
             cursor: pointer;
-            background: {CURE_BG};
+            background: {CURE_SURFACE};
             color: {CURE_TEXT};
         }}
         .feedback-summary {{
-            background-color: {CURE_SURFACE};
+            background-color: rgba(74,222,128,0.08);
             border-radius: 8px;
             border: 1px solid {CURE_BORDER};
             padding: 7px 12px;
@@ -207,6 +219,7 @@ def app_css() -> None:
         .stChatMessage {{
             border-radius: 12px !important;
             border: 1px solid {CURE_BORDER} !important;
+            background: {CURE_SURFACE} !important;
         }}
 
         /* ── Expander styling ────────────────────────────────────── */
@@ -221,6 +234,24 @@ def app_css() -> None:
             border-radius: 10px;
             padding: 12px 16px;
             border: 1px solid {CURE_BORDER};
+        }}
+        [data-testid="stMetric"] [data-testid="stMetricValue"] {{
+            color: {CURE_PRIMARY} !important;
+        }}
+
+        /* ── Scrollbar (dark green) ──────────────────────────────── */
+        ::-webkit-scrollbar {{
+            width: 8px; height: 8px;
+        }}
+        ::-webkit-scrollbar-track {{
+            background: {CURE_BG};
+        }}
+        ::-webkit-scrollbar-thumb {{
+            background: rgba(74,222,128,0.2);
+            border-radius: 4px;
+        }}
+        ::-webkit-scrollbar-thumb:hover {{
+            background: rgba(74,222,128,0.35);
         }}
         </style>
         """,
@@ -384,7 +415,7 @@ def sidebar(logo_path: str) -> str:
         # Version badge
         st.markdown(
             f"<div style='text-align:center; margin-top:20px; padding:10px; "
-            f"background:{CURE_BG}; border-radius:10px; border:1px solid {CURE_BORDER};'>"
+            f"background:{CURE_SURFACE}; border-radius:10px; border:1px solid {CURE_BORDER};'>"
             f"<span style='color:{CURE_PRIMARY}; font-size:12px; font-weight:600;'>CURE v2.0</span><br>"
             f"<span style='color:{CURE_TEXT_SECONDARY}; font-size:11px;'>Codebase Analysis<br>&amp; Refactor Engine</span>"
             f"</div>",
@@ -575,13 +606,13 @@ def render_phase_tracker(
         bg = CURE_SURFACE
         if status == "completed":
             color = CURE_GREEN
-            bg = "#F0FDF4"
+            bg = "rgba(74,222,128,0.08)"
         elif status == "in_progress":
             color = CURE_PRIMARY
-            bg = "#EFF6FF"
+            bg = "rgba(74,222,128,0.12)"
         elif status == "error":
             color = CURE_RED
-            bg = "#FEF2F2"
+            bg = "rgba(239,68,68,0.08)"
 
         with cols[i]:
             st.markdown(
@@ -601,10 +632,10 @@ def render_phase_tracker(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 LOG_LEVEL_COLORS = {
-    "INFO": "#1D1D1F",
-    "WARNING": "#FF9F0A",
-    "ERROR": "#FF3B30",
-    "DEBUG": "#86868B",
+    "INFO": "#F0F8F4",
+    "WARNING": "#F59E0B",
+    "ERROR": "#EF4444",
+    "DEBUG": "#94A3B8",
 }
 
 
@@ -645,7 +676,7 @@ def render_log_stream(
         # Escape HTML in message
         safe_msg = msg.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         lines_html.append(
-            f"<span style='color:#666;'>{ts}</span> "
+            f"<span style='color:#6B7280;'>{ts}</span> "
             f"<span style='color:{color};'>{safe_msg}</span>"
         )
 
@@ -665,10 +696,10 @@ def render_log_stream(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 SEVERITY_COLORS = {
-    "Critical": "#FF3B30",
-    "High": "#FF6B35",
-    "Medium": "#FF9F0A",
-    "Low": "#34C759",
+    "Critical": "#EF4444",
+    "High": "#F97316",
+    "Medium": "#F59E0B",
+    "Low": "#4ADE80",
 }
 
 

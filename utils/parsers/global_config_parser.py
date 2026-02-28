@@ -73,7 +73,8 @@ FLAT_KEY_MAP: Dict[str, str] = {
     "PROMPT_FILE_PATH":       "paths.prompt_file_path",
     # LLM / API
     "QGENIE_API_KEY":         "llm.qgenie_api_key",
-    "ANTHROPIC_API_KEY":      "llm.anthropic_api_key",
+    "LLM_API_KEY":            "llm.llm_api_key",
+    "ANTHROPIC_API_KEY":      "llm.llm_api_key",       # backward compat alias
     "LLM_MODEL":              "llm.model",
     "STREAMLIT_MODEL":        "llm.streamlit_model",
     "CODING_LLM_MODEL":       "llm.coding_model",

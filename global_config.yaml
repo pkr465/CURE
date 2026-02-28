@@ -1,9 +1,10 @@
 # ============================================================================
-# QGenie Codebase Update & Refactor Engine — Global Configuration
+# CURE — Codebase Update & Refactor Engine — Global Configuration
 # ============================================================================
 # YAML configuration file providing structured, typed, hierarchical settings.
 # Supports environment variable overrides via ${ENV_VAR} syntax.
-# Copy this file to global_config.yaml and customize for your environment.
+# API keys live in .env (QGENIE_API_KEY, LLM_API_KEY).
+# Everything else is configured here.
 # ============================================================================
 
 # ----------------------------------------------------------------------------
@@ -75,8 +76,8 @@ llm:
   #streamlit_model: "azure::gpt-5.2"
   streamlit_model: "anthropic::claude-sonnet-4-20250514"
 
-  # ── API keys — prefer ${ENV_VAR} overrides for secrets ─────────────────
-  anthropic_api_key: ${ANTHROPIC_API_KEY}
+  # ── API keys — loaded from .env ───────────────────────────────────────
+  llm_api_key: ${LLM_API_KEY}
   qgenie_api_key: ${QGENIE_API_KEY}
 
   # ── QGenie Specific Settings ───────────────────────────────────────────
@@ -115,11 +116,11 @@ database:
 
   # Application user
   username: codebase_analytics_user
-  password: ${POSTGRES_PASSWORD}
+  password: postgres
 
   # Admin credentials (migrations/setup only)
   admin_username: postgres
-  admin_password: ${POSTGRES_ADMIN_PASSWORD}
+  admin_password: postgres
 
   # LangChain / pgvector collection tables
   collection: codebase_analytics_data_2025
@@ -182,7 +183,7 @@ email:
   smtp_host: "" # e.g., smtp.gmail.com
   smtp_port: 587
   smtp_username: ""
-  smtp_password: ${SMTP_PASSWORD}
+  smtp_password: ""
   smtp_use_tls: true
   sender_email: ""
   sender_name: "Codebase Analysis Agent"
@@ -282,7 +283,7 @@ hitl:
   enable: false
   # PostgreSQL connection (uses database.connection by default)
   # store_db_path is deprecated — HITL now uses PostgreSQL
-  store_db_path: "${OUT_DIR}/hitl/feedback.db"
+  store_db_path: "./out/hitl/feedback.db"
   rag_top_k: 5
   rag_similarity_threshold: 0.6
   excel_analysis_sheet: "Analysis"
